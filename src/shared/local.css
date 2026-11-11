@@ -1,0 +1,2 @@
+.k8s-pad { padding: 12px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.k8s-center { display: flex; align-items: center; justify-content: center; min-height: 120px; }

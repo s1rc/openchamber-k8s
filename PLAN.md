@@ -1,0 +1,475 @@
+# K8s extension: build plan
+
+A Lens-style Kubernetes IDE inside OpenChamber, scoped to the open project's cluster and namespace when it can tell, with agent tools that respect a production lock.
+
+This file is the contract for the build. Work the phases in order. Each phase ends with its "Done when" checks passing. If a spike in Phase 0 fails, stop and report before building on top of it.
+
+## Read first
+
+1. `/Users/example/.config/openchamber/run/instances/<n>/skills/openchamber-extensions/SKILL.md` (the instance number in the path changes when OpenChamber restarts: if missing, `ls /Users/example/.config/openchamber/run/instances/`).
+2. `../shared-ui/USAGE.md`.
+3. `node_modules/@openchamber/sdk/API.md` and `GUEST_SERVICES.md` after install, for any manifest key or host method.
+4. `../linear` as the reference layout for a Preact extension with shared-ui (build script, `src/app`, `src/blocks`, `src/service`, styles concatenation).
+5. `../wiz` for a service with `exec`, skills, instructions, mentions and blocks.
+
+## Decisions (from the interview)
+
+| Topic | Decision |
+|---|---|
+| Lens views | All of them: cluster overview, nodes, workloads, config, network, storage, namespaces, events, access control, custom resources, Helm, logs, pod shell, port forwarding, YAML view and edit, metrics, Flux and Argo CD |
+| Writes | Full write. Production contexts are locked (read-only) until the user unlocks them |
+| Project detection | Priority: 1. remembered pick for this project, 2. env files, 3. inferred from repo contents. No repo pin file, no repo-name matching |
+| Placement | Rail panel, full page (same app, wide layout), `@` mentions, chat blocks, "Ask agent" on any resource, agent instructions and skill. No Work Status section |
+| Pod shell | Inside OpenChamber only. Copy shell command (paste into OpenChamber's terminal) plus a one-command console in the panel. Never launch an external terminal app |
+| Metrics | metrics-server for current usage, Prometheus for history when found |
+| Updates | Live watch, pushed from the service |
+| Clusters | Kubeconfig plus EKS discovery across AWS profiles. Expired SSO shows a Sign in button |
+| Port forwards | Keep running after the panel closes, until stopped |
+| Secrets | Masked, reveal on click in the UI. The agent never gets values (mentions, Ask agent, blocks, plugin tools all redact) |
+| Agent access | OpenCode plugin tools that obey the lock. A write on a locked context needs a `K8sApprove` click |
+| Blocks | `K8sApprove`, `K8sLogs`, `K8sEvents`, `K8sPickContext` |
+| UI stack | Preact (`@openchamber-ext/shared-ui/preact`), the size of this UI needs components |
+| Visibility | Private, local install only |
+
+### Full page vs rail panel
+
+`contributes.page: true` reuses `panel.entry`. The panel cannot open the page itself (the sidebar's Extension pages menu is the only opener, and `openSurface` does not open it). So: one app, two layouts chosen from `ctx.surface` and width. Rail (about 360px): stacked, one thing at a time. Page: Lens layout with left nav, table, right detail drawer, bottom dock.
+
+## User's environment (checked on this machine)
+
+- `/opt/homebrew/bin`: `kubectl` 1.37, `helm`, `aws`, `gcloud`, `k9s`. No `az`.
+- Kubeconfig contexts (all EKS):
+  - `initech-production-ap-southeast-2`, `initech-production-us-east-1`, `initech-staging-us-east-1` (account 987654321098, aws exec auth)
+  - `northwind-production-eks` (123456789012), `northwind-staging-eks-us-east-1` (210987654321), both user `nw-oidc` (likely kubelogin / `kubectl oidc-login`; confirm in Phase 0)
+- Terminal: OpenChamber's own terminal only. The SDK gives extensions no terminal access, so the extension never opens or drives a terminal.
+- The service gets only `PATH`, `HOME`, temp and locale from the host. No `AWS_PROFILE` or `KUBECONFIG` from the user's shell. `PATH` from a Finder-launched app may lack `/opt/homebrew/bin`.
+
+## Architecture
+
+```
+panel/page (Preact, sandboxed) ──serviceRequest──▶ service (Node, keepRunning)
+        ▲                                             │
+        └──────────── host.emit(topic, data) ─────────┤
+                                                       ├─ kubectl proxy --unix-socket (one per active context)
+                                                       │     └─ REST: list, get, watch, logs, metrics, Prometheus service proxy
+                                                       ├─ kubectl exec / port-forward / cordon / drain (child processes)
+                                                       ├─ helm (child process, JSON output)
+                                                       └─ aws (EKS discovery, sso login)
+blocks (Preact) ──serviceRequest──▶ service
+OpenCode plugin (runs in OpenCode) ──files──▶ ~/.config/openchamber-k8s/state  ◀── service
+```
+
+### Why `kubectl proxy` over a unix socket
+
+- One authenticated channel per context. kubectl runs the exec auth plugins (aws, oidc) and refreshes tokens, so the service never handles credentials.
+- Plain HTTP gives everything the UI needs: `?watch=true` streams, `/log?follow=true`, `/apis/metrics.k8s.io`, and Prometheus through `/api/v1/namespaces/<ns>/services/<svc>:<port>/proxy/...` (no port-forward needed for metrics).
+- `--unix-socket=<state>/sock/<hash>.sock` in a `0700` folder, so no other local user or browser tab can reach it (a TCP `kubectl proxy` is open to any local process). Node `http.request({ socketPath })`.
+- Start on first use of a context; stop after 10 minutes unused. Restart on exit. Auth failure output from the proxy maps to the error codes below.
+
+### Service lifetime
+
+`service.keepRunning: true`, because port forwards must outlive the panel. Stay quiet when nothing is open: no proxies, no watches, no timers except forwards and lease expiry.
+
+### Live watch
+
+- Panel calls `POST /watch { context, namespace, kind }` and gets `{ watchId, items, resourceVersion }` (snapshot first, the skill says `emit` never replays).
+- Service holds one watch stream per (context, namespace, kind), shared by every frame that asked.
+- Pushes deltas as `host.emit('watch', { watchId, events: [{ type, object }] })`, batched every 250 ms, split to stay under 64 000 characters and 30 emits per second. Strip `managedFields` before sending.
+- Lease: the panel renews `POST /watch/lease { watchIds }` every 30 s while visible (`document.visibilityState`). A watch with no lease for 60 s closes. Handle `410 Gone` by relisting.
+- On service restart the frame gets `UNKNOWN_WATCH` on lease and resubscribes.
+
+### Shared state on disk
+
+The plugin runs inside OpenCode and cannot call the service, so the lock and approvals live in files both read. Folder `~/.config/openchamber-k8s/` (mode `0700`, files `0600`), outside the package so writes never reload the extension:
+
+| File | Contents |
+|---|---|
+| `projects.json` | `{ [projectDir]: { context, namespace, source, pickedAt } }` remembered picks |
+| `locks.json` | `{ protected: { [context]: true\|false }, unlocked: { [context]: expiresAtIso } }` |
+| `approvals.json` | `{ [hash]: { expiresAt, action, used: false } }`, single use, 10 minute expiry |
+| `forwards.json` | active port forwards, to restore after a service restart |
+| `sock/` | proxy sockets |
+
+Write with write-to-temp then rename. Keep `OPENCHAMBER_SERVICE_DATA_DIR` for service-only caches (EKS discovery results, resource index).
+
+The lock is a guardrail, not a security boundary: an agent with shell access can run `kubectl` directly or edit these files. Say so in the skill, and tell agents to use the plugin tools.
+
+### Production detection
+
+A context is protected when its name or cluster ARN matches `/prod/i`, unless the user overrides it per context (a switch in the context picker, saved in `locks.json`). Unlock lasts 30 minutes per context. The panel shows a warning banner with a countdown and "Lock now" while unlocked.
+
+### Errors (never a 500)
+
+Every route answers `{ ok: false, code, error, action? }` on failure. Codes:
+
+| Code | When | UI |
+|---|---|---|
+| `NO_KUBECTL` | binary not found | Banner: install kubectl, shows the PATH searched |
+| `AUTH_EXPIRED` | aws SSO or OIDC token expired | Banner with Sign in button: `POST /auth/login` runs `aws sso login --profile <p>` (opens the browser) or, for OIDC, runs `kubectl --context X get ns` from the service so kubelogin opens the browser. No terminal window |
+| `FORBIDDEN` | RBAC 403 | Inline note on that view, keep the rest working |
+| `UNREACHABLE` | network, VPN, private endpoint | Banner: cluster not reachable, check VPN |
+| `LOCKED` | write on a protected context | Unlock prompt |
+| `NOT_FOUND`, `CONFLICT` | k8s 404, 409 | Toast with the message |
+| `INVALID`, `BAD_REQUEST` | k8s 400 or 422, or a bad argument | Toast with the message |
+| `NO_CONTEXT` | the cluster name is not in the kubeconfig | Inline note, back to the picker |
+| `UNKNOWN_WATCH` | lease for a watch the service no longer has | Frame opens the watch again |
+| `K8S_ERROR`, `INTERNAL` | anything unclassified | Toast with a short message |
+
+Binary lookup: `PATH`, then `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, `~/bin`. Pass the extended `PATH` to every child, so kubectl finds `aws` and `kubectl-oidc_login`.
+
+## Project scope resolver
+
+Input: project directory (from `ctx` in the frame, `directory` in mention searches, the plugin tool context). Output: `{ context, namespace, source, confidence, reasons[] }` or `null`.
+
+1. **Remembered pick**: `projects.json[dir]`. Saved whenever the user picks a context or namespace in that project. Source label "Your pick".
+2. **Env files** in the project root: `.envrc`, `.env`, `.env.local`, `.env.development`. Parse `export KEY=value` and `KEY=value` only, never execute.
+   - `KUBECONFIG`: use that file for this project (pass `--kubeconfig`).
+   - `KUBECONTEXT`, `KUBE_CONTEXT`, `K8S_CONTEXT`: context by name.
+   - `AWS_PROFILE`: read `~/.aws/config` for `sso_account_id` or the role ARN account, and `region`; pick contexts whose cluster ARN has that account, prefer that region. Several matches: return all as candidates, preselect none, let the user pick, then remember the pick.
+   - `NAMESPACE`, `KUBE_NAMESPACE`, `K8S_NAMESPACE`.
+   Source label "From .envrc" (the actual file name).
+3. **Repo contents**, bounded scan (max depth 4, max 2 000 files, skip `node_modules`, `.git`, `vendor`, `dist`):
+   - Argo CD `Application`/`ApplicationSet`: `spec.destination.server` or `.name`, `spec.destination.namespace`.
+   - Flux `Kustomization`/`HelmRelease`: `spec.targetNamespace`, `metadata.namespace`.
+   - Kustomize `kustomization.yaml`: `namespace`.
+   - Helm `values*.yaml` per env folder, `Chart.yaml` name as a hint for release name.
+   - Plain manifests: most common `metadata.namespace`.
+   - Terraform: `aws_eks_cluster` `name`, `module "eks"` `cluster_name`, `data "aws_eks_cluster"` `name`; match against cluster ARN suffix.
+   - Skaffold `deploy.kubeContext`, Tilt `allow_k8s_contexts`.
+   Score candidates, return the best with `reasons` ("namespace `contracts` from k8s/overlays/staging/kustomization.yaml").
+4. Nothing found: no scope, the panel shows all contexts with the kubeconfig current one selected and a hint "Pick a cluster to remember it for this project".
+
+Cache results per directory for 5 minutes (mention search has a 2 s budget). Show the source as a chip next to the context picker, with the reasons in a tooltip.
+
+## UI
+
+Order of choice for every piece: SDK kit, then shared-ui, then local code with prefix `k8s-` and only `--oc-*` colors. Never rebuild a kit control.
+
+| Piece | From |
+|---|---|
+| Buttons, selects (context, namespace, section), search, tabs, menus (row actions), switches (protected context), badges, banners (auth, lock, unreachable), empty states, spinners, progress (capacity), text fields (YAML editor, console input, values) | Kit |
+| Stat cards (overview counts), cards, sections, key/value grids (resource overview), chips (labels, annotations, source), dots (status), `api` call, `toast` | shared-ui |
+| Resource table (sortable, column registry, virtualized past 300 rows), detail drawer, bottom dock, log viewer (ANSI-free, search, wrap toggle), sparkline and area charts (SVG), YAML diff view, pod container dots | Local |
+
+### Layout
+
+**Header** (both layouts): context select (searchable, grouped by AWS account, shows protected badge), namespace select (All namespaces + list), scope source chip, lock badge with Unlock/Lock action, refresh state dot (live, reconnecting, offline).
+
+**Page layout**: left nav (Lens order) | resource table | detail drawer (right, resizable). Bottom dock with tabs for open logs, consoles and the port forward list.
+
+**Rail layout**: header, section select, table as a compact list (name, status dot, one key column), tap opens detail full width with a back button. Logs and console open as a detail tab.
+
+### Navigation and columns (Lens parity)
+
+| Section | Kinds | Key columns |
+|---|---|---|
+| Cluster | Overview | CPU, memory, pods capacity vs requests vs usage; node count; warning events list |
+| Nodes | Node | Name, CPU, Memory, Disk, Taints, Roles, Version, Age, Conditions |
+| Workloads | Overview, Pod, Deployment, DaemonSet, StatefulSet, ReplicaSet, Job, CronJob | Pod: Name, Namespace, Containers (dots), Restarts, Controlled by, Node, QoS, Age, Status. Deployment: Name, Namespace, Pods (ready/desired), Replicas, Age, Conditions. CronJob: Schedule, Suspend, Active, Last schedule |
+| Config | ConfigMap, Secret, ResourceQuota, LimitRange, HorizontalPodAutoscaler, PodDisruptionBudget, PriorityClass, RuntimeClass, Lease, MutatingWebhookConfiguration, ValidatingWebhookConfiguration | Secret: Name, Namespace, Labels, Keys, Type, Age. HPA: Metrics, Min, Max, Replicas |
+| Network | Service, Endpoints, EndpointSlice, Ingress, IngressClass, NetworkPolicy | Service: Type, Cluster IP, Ports, External IP, Selector, Status |
+| Storage | PersistentVolumeClaim, PersistentVolume, StorageClass | PVC: Storage class, Size, Pods, Status |
+| Namespaces | Namespace | Name, Labels, Age, Status |
+| Events | Event | Type, Message, Namespace, Involved object, Source, Count, Age, Last seen |
+| Helm | Releases, Charts | Release: Name, Namespace, Chart, Revision, Version, App version, Status, Updated |
+| Access control | ServiceAccount, ClusterRole, Role, ClusterRoleBinding, RoleBinding | Bindings: Subjects, Role |
+| Custom resources | Definitions, then one entry per CRD grouped by API group | `additionalPrinterColumns` from the CRD |
+| GitOps | Flux (Kustomization, HelmRelease, GitRepository, HelmRepository, OCIRepository), Argo CD (Application, ApplicationSet, AppProject) | Ready/Synced/Health, revision, last reconcile, message. Shown only when the CRDs exist |
+| Port forwarding | Active forwards | Resource, Ports, Local URL, Status |
+
+Column definitions live in one registry (`src/shared/kinds.ts`): kind, API path, namespaced, columns with value getters and sort keys, status function, actions. Unknown kinds fall back to Name, Namespace, Age.
+
+### Detail drawer
+
+Tabs: Overview (kv grid: metadata, labels and annotations as chips, owner and controlled links, conditions table, kind-specific blocks such as containers with image, ports, env (secret refs shown as references), mounts, probes, resources), YAML, Events, Logs (pods and workloads), Metrics (pods, nodes, workloads), Pods (for controllers, services), History (Deployments, Helm).
+
+Action menu per kind:
+
+| Kind | Actions |
+|---|---|
+| Pod | Logs, Copy shell command, Console, Port forward, Edit, Delete, Evict, Ask agent |
+| Deployment, StatefulSet, DaemonSet | Logs (all pods), Scale, Restart, Rollback (pick revision), Pause/Resume (Deployment), Edit, Delete, Ask agent |
+| CronJob | Trigger now, Suspend/Resume, Edit, Delete, Ask agent |
+| Job | Logs, Delete, Ask agent |
+| Node | Cordon, Uncordon, Drain (confirm, shows pods to evict), Copy node shell command (`kubectl debug node/<n> -it --image=busybox`), Ask agent |
+| Service | Port forward, Edit, Delete |
+| Secret | Reveal values (per key), Edit, Delete |
+| Helm release | Values, Manifest, History, Rollback, Upgrade with edited values, Uninstall |
+| Flux | Reconcile (annotate `reconcile.fluxcd.io/requestedAt`), Suspend/Resume |
+| Argo CD Application | Refresh, Sync (patch `operation`), Ask agent |
+| Any | Copy name, Copy YAML, Edit, Delete |
+
+Every write on a protected locked context is refused with `LOCKED`. Delete, drain, rollback, uninstall and any edit show a confirm step. Edit runs a server-side dry run first (`?dryRun=All`) and shows the diff before Save.
+
+### Logs
+
+Follow via `GET /api/v1/namespaces/<ns>/pods/<pod>/log?follow=true&timestamps=true&tailLines=500&container=<c>`, pushed as `emit('logs', { streamId, lines })` with the same batching and lease as watches. Container select, Previous (crashed) toggle, timestamps toggle, wrap toggle, search with highlight, Download (copy to clipboard), "Ask agent about these logs". Workload logs merge every pod with a pod prefix column. Keep 5 000 lines in the frame.
+
+### Shell and console
+
+- **Shell**: the extension never opens a terminal app. "Copy shell command" builds `kubectl --context <c> -n <ns> exec -it <pod> -c <container> -- sh -c 'command -v bash >/dev/null && exec bash || exec sh'` (every value shell-escaped), copies it with `host.writeClipboard` (not `navigator.clipboard`, which the sandbox blocks), and toasts "Copied. Paste it in OpenChamber's terminal." The drawer also shows it as a selectable mono line with a copy button.
+- **Console** (panel): one command at a time, `kubectl exec <pod> -c <c> -- sh -c '<input>'`, no TTY, 30 s timeout, output capped at 1 MB, history up/down. Shows a note that interactive programs need Shell.
+
+### Port forwarding
+
+`kubectl port-forward` per forward (`pod/<p>` or `svc/<s>`), local port chosen by the user or free port. Listed in the Port forwarding section and the dock with Open (link to `http://localhost:<port>`), Copy, Stop. Restore from `forwards.json` on service start. Restart a dropped forward up to 3 times, then mark it failed.
+
+### Metrics
+
+- metrics-server: `/apis/metrics.k8s.io/v1beta1/nodes` and `.../pods`. If missing, show "Install metrics-server for usage" in the overview, not an error.
+- Prometheus detection per context: Services labelled `app.kubernetes.io/name` in `prometheus`, `kube-prometheus-stack-prometheus`, or named `prometheus-*`, `prometheus-operated`. User override in the context menu ("Prometheus service"). Queries through the service proxy: CPU, memory, network, filesystem per pod, node and workload, last 1 h at 60 s step (Lens's default queries are the model). Charts are local SVG using `--oc-primary`, `--oc-info`, `--oc-warning`, `--oc-muted`.
+
+### EKS discovery and sign-in
+
+- Read profiles from `~/.aws/config`. For each profile with SSO or credentials, run `aws eks list-clusters --region <r>` for the profile's region and any region already in the kubeconfig. Cache 1 h in the data dir, refresh on demand ("Discover EKS clusters" in the context select).
+- A discovered cluster missing from kubeconfig shows "Add" which runs `aws eks update-kubeconfig --name <n> --region <r> --profile <p> --alias <account-alias-or-name>-<region>`. This writes to `~/.kube/config`: confirm first, show the exact command.
+- Expired SSO: detect `Token has expired`, `SSO session ... expired`, `UnauthorizedSSOTokenError` in proxy or aws output. Sign in runs `aws sso login --profile <p>` (opens the browser), then retries.
+
+### Ask agent
+
+Menu item on every resource, log view and event list. Uses `host.prompt` with `send: true` (capability `prompt`) into the current session; with no session, `host.startSession`. Text: context, namespace, kind/name, a trimmed redacted YAML (no `managedFields`, no `status` noise beyond conditions), last 20 events, and for pods the last 100 lines of each container's logs, plus the question "Summarize this resource and find the cause of any problem." Cap at 40 000 characters.
+
+### Redaction (one function, used everywhere the agent can see data)
+
+- Secret: replace each `data` and `stringData` value with `<redacted, N bytes>`.
+- Any object: drop `metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"]` for Secrets (it holds the values).
+- Helm: release values and manifests can hold secrets. Redact keys matching `/(password|secret|token|key|credential)/i` and every `kind: Secret` document in a manifest.
+- Unit tests for each rule.
+
+## Agent surfaces
+
+### Instructions (`instructions: true`)
+
+Per project, once its scope is resolved: `setInstructions(dir, text)` with about 6 lines: the context and namespace, whether it is protected and locked, "Use the k8s_* tools, not raw kubectl. Writes on a locked context need the user's K8sApprove click." Global (`null`) text: one line pointing to the skill. Update when the scope or lock changes.
+
+### Skill (`skills/k8s/SKILL.md`)
+
+Name the work in the description: "Inspect, debug or change Kubernetes resources in the user's clusters". Covers: the tools and when to use each, always pass context and namespace, the approval flow, the blocks and their arguments, redaction (never ask for secret values), and that the lock is a guardrail.
+
+### OpenCode plugin (`plugin/index.js`, bundled from `src/plugin/index.ts`)
+
+Default export `{ id: 'k8s-tools', setup }`, imports nothing at the top (spike: dynamic `import('node:child_process')` or `Bun.spawn` inside `execute`). Tools, all with `options: { codemode: false }` and JSON Schema input:
+
+| Tool | Input | Notes |
+|---|---|---|
+| `k8s_contexts` | none | Contexts, protected and lock state, project scope if any |
+| `k8s_get` | context?, namespace?, kind, name?, selector?, output (`table`/`yaml`) | Redacted |
+| `k8s_describe` | context?, namespace?, kind, name | Redacted, events included |
+| `k8s_logs` | context?, namespace?, pod, container?, tail (max 500), previous? | |
+| `k8s_events` | context?, namespace?, kind?, name? | |
+| `k8s_apply` | context?, namespace?, manifest, dryRun? | Server-side apply. Dry run always allowed |
+| `k8s_scale` | context?, namespace?, kind, name, replicas | |
+| `k8s_restart` | context?, namespace?, kind, name | `rollout restart` |
+| `k8s_delete` | context?, namespace?, kind, name | |
+
+Missing context/namespace uses the project scope (spike: find the directory in the tool's execute context; fallback `process.cwd()`).
+
+Write flow on a protected, locked context:
+
+1. Tool computes `hash = sha256(context|namespace|verb|kind|name|sha256(payload))`.
+2. No matching unused approval in `approvals.json`: answer `{ content }` "Locked. Ask the user with K8sApprove(\"<context>\", \"<namespace>\", \"<verb>\", \"<kind>/<name>\", \"<summary>\", \"<hash>\"), then call this tool again with the same arguments."
+3. User clicks Approve in the block: block calls `POST /approve { hash, ... }`, service checks the hash matches the shown arguments, writes the approval (10 min, single use), then `answerBlock('approved')`. Reject answers `rejected`.
+4. Agent calls the tool again, plugin finds and marks the approval used, runs the write.
+
+Unprotected or unlocked contexts write directly. Every write is appended to `~/.config/openchamber-k8s/audit.log` (time, project, context, verb, target, source: panel or agent).
+
+`contributes.tools`: `{ "match": "k8s_*", "name": "Kubernetes", "icon": "icon.svg", "title": "{input.kind} {input.name}", "output": "auto" }`.
+
+### Mentions (`mentions: { label: "Kubernetes" }`)
+
+Search: pods, deployments, statefulsets, services, cronjobs in the project scope (else current context, all namespaces), from an in-memory index refreshed in the background every 60 s while used and on watch events. Answer in under 2 s from memory, empty on a cold start while it fills. Title `<kind>/<name>`, subtitle `<namespace> · <context> · <status>`. Resolve: the same text as Ask agent, redacted.
+
+### Blocks (one `blocks/index.html`, routed by name)
+
+| Block | Args | answers | Draws |
+|---|---|---|---|
+| `K8sApprove` | context, namespace, verb, target, summary, hash | true | Protected badge, exact change, diff for apply (fetched from service by hash), Approve / Reject. Never acts until clicked |
+| `K8sLogs` | context, namespace, pod, container, lines | false | Last N lines (max 200), refresh button, "Open in panel" hint |
+| `K8sEvents` | context, namespace, kind, name | false | Event rows with type dot, reason, message, count, age |
+| `K8sPickContext` | question, filter | true | Contexts (filtered by substring) with account and protected badge, namespace select, Use. Answers `context/namespace` and saves the pick for the project |
+
+Descriptions must stay under 120 characters and narrow enough that `K8sPickContext` takes only cluster questions.
+
+## Manifest draft
+
+```json
+{
+  "name": "k8s",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": { "openchamber": ">=2.7.0" },
+    "id": "k8s",
+    "name": "Kubernetes",
+    "icon": "icon.svg",
+    "contributes": {
+      "panel": { "entry": "panel/index.html" },
+      "page": true,
+      "capabilities": ["prompt", "sessions"],
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "keepRunning": true,
+        "permissions": { "exec": ["kubectl", "helm", "aws"] }
+      },
+      "instructions": true,
+      "skills": "skills",
+      "opencodePlugin": "plugin",
+      "mentions": { "label": "Kubernetes" },
+      "blocks": [
+        { "name": "K8sApprove", "description": "Asks the user to approve a write on a locked cluster. Args from the k8s tool's Locked reply", "args": ["context", "namespace", "verb", "target", "summary", "hash"], "entry": "blocks/index.html", "height": 220, "answers": true },
+        { "name": "K8sLogs", "description": "Shows the last lines of a pod's logs. lines: count, max 200", "args": ["context", "namespace", "pod", "container", "lines"], "entry": "blocks/index.html", "height": 240 },
+        { "name": "K8sEvents", "description": "Shows recent Kubernetes events for a resource or a namespace", "args": ["context", "namespace", "kind", "name"], "entry": "blocks/index.html", "height": 200 },
+        { "name": "K8sPickContext", "description": "Asks which Kubernetes cluster and namespace to use. filter: part of a context name, or empty", "args": ["question", "filter"], "entry": "blocks/index.html", "height": 220, "answers": true }
+      ],
+      "tools": [
+        { "match": "k8s_*", "name": "Kubernetes", "icon": "icon.svg", "title": "{input.kind} {input.name}", "output": "auto" }
+      ]
+    }
+  },
+  "dependencies": { "@openchamber/sdk": "2.7.0", "@openchamber-ext/shared-ui": "../shared-ui", "preact": "^11.2.0", "yaml": "^2" }
+}
+```
+
+Check every key against `API.md` before relying on it. Ship `icon.svg` (Kubernetes wheel, single path, `currentColor`).
+
+## File layout
+
+```
+k8s/
+  package.json  tsconfig.json  icon.svg  PLAN.md  README.md  .gitignore (node_modules)
+  scripts/build.sh
+  src/
+    app/        main.tsx, App.tsx, layout/, views/, detail/, dock/, table/, charts/
+    blocks/     main.tsx (routes by block name)
+    service/    main.ts, routes.ts, kubeconfig.ts, proxy.ts, k8s.ts (REST client), watch.ts, logs.ts,
+                exec.ts, forwards.ts, helm.ts, metrics.ts, eks.ts, scope.ts, state.ts, mentions.ts,
+                instructions.ts, errors.ts, bins.ts
+    plugin/     index.ts
+    shared/     kinds.ts, redact.ts, approval.ts (hash), types.ts, local.css
+  panel/  index.html, main.js, styles.css (built)
+  blocks/ index.html, main.js, styles.css (built)
+  service/main.js  plugin/index.js (built)
+  skills/k8s/SKILL.md
+  test/   scope.test.ts, redact.test.ts, approval.test.ts, kinds.test.ts, fixtures/
+```
+
+`scripts/build.sh` follows `../linear/scripts/build.sh`: `bun install --silent`, bundle `src/app/main.tsx` to `panel/main.js`, `src/blocks/main.tsx` to `blocks/main.js`, `--node src/service/main.ts` to `service/main.js`, `--node src/plugin/index.ts` to `plugin/index.js`, then `cat` shared-ui styles plus `src/shared/local.css` into each frame's `styles.css`.
+
+## Phases
+
+Estimates are for the building agent, assuming spikes pass.
+
+### Phase 0: scaffold and spikes (about 45 min) - DONE
+
+1. `bun init -y`, `bun add @openchamber/sdk@2.7.0`, `bun add ../shared-ui`, `bun add preact`. Check the `package.json` diff bun rewrote.
+2. Manifest from the draft, build script, `tsconfig` (`jsx: react-jsx`, `jsxImportSource: preact`), empty panel, blocks, service with `/health`, plugin with `k8s_contexts`.
+3. Spikes, each a few lines, results written into this file under "Spike results":
+   - a. Service `PATH` under the desktop app: does it include `/opt/homebrew/bin`? Does `kubectl --context initech-staging-us-east-1 get ns` work from the service with the extended PATH?
+   - b. `kubectl proxy --unix-socket` with an EKS context; a `GET /api/v1/namespaces` over the socket from Node.
+   - c. What the `nw-oidc` user runs (`kubectl config view --minify --context northwind-staging-eks-us-east-1 -o json`, read the exec block only, never print tokens).
+   - d. Plugin: can `execute` spawn a process (dynamic `node:child_process` import or `Bun.spawn`)? What does its second argument hold (session id, directory)?
+   - e. Dropped: no external terminal. Never launch Ghostty, Terminal.app or `osascript`.
+   - f. `host.emit` from a `keepRunning` service reaches the panel and the page.
+
+Done when: `bun run build` and `bunx openchamber-guest-check` pass, the extension installs, the panel says hello, all spikes have a recorded answer.
+
+### Phase 1: service core (about 2 h) - DONE
+
+Binary lookup, kubeconfig read (`kubectl config view -o json`, no secrets kept), contexts route, proxy manager, REST client with error mapping, state files, lock logic, scope resolver, routes: `GET /contexts`, `GET /scope?dir=`, `POST /scope` (remember pick), `POST /lock`, `POST /unlock`, `GET /list`, `GET /get`, `POST /watch`, `POST /watch/lease`, `POST /apply` (with `dryRun`), `POST /delete`, `POST /scale`, `POST /restart`.
+
+Done when: curl against each route works on `initech-staging-us-east-1`, a write on a production context answers `LOCKED`, `scope.test.ts` and `approval.test.ts` pass.
+
+**Phase 1 results** (built and checked on `initech-staging-us-east-1`):
+
+- Service files: `bins`, `exec`, `errors`, `state`, `kubeconfig`, `proxy`, `k8s` (REST client, kind discovery), `watch`, `scope`, `routes`, `main`. Shared: `types`, `kinds` (paths only for now), `redact`, `locks`, `approval`.
+- Routes: `GET /health`, `GET /contexts`, `GET /scope`, `POST /scope`, `POST /lock`, `POST /unlock`, `POST /protect` (the per-context override), `GET /list`, `GET /get`, `POST /watch`, `POST /watch/lease`, `POST /apply`, `POST /delete`, `POST /scale`, `POST /restart`. Every failure is HTTP 200 with `{ ok: false, code, error, action? }`; only an unknown route is 404.
+- Checked live: contexts with protected and locked flags; scope from a `.envrc`; list and get (core, grouped, and kinds found through discovery); Secret values hidden in list, get and apply, shown only with `reveal=1`; a watch on Leases pushed `live` and batched `MODIFIED` events, lease renewal worked, `UNKNOWN_WATCH` for an unknown id, and a watch with no lease closed after 60 s; scale, restart, delete and apply as server-side dry runs on staging (nothing was changed); real writes on every production context answered `LOCKED` before any connection was made (no proxy was started for production); unlock and lock changed the state and the 30-minute expiry is unit-tested.
+- Not exercised: a real (non-dry-run) write on staging, an expired SSO or OIDC token (it could open a browser), and any request to the `northwind-*` clusters.
+- Tests: `bun test` runs 104 tests in 9 files, including `scope.test.ts` and `approval.test.ts`.
+
+Decisions taken while building:
+
+- Approval hash: fields are escaped (`\` and `|`) before joining. The plan's plain `|` join let `a|b` + `c` collide with `a` + `b|c`; a test caught it. The plugin in Phase 7 must use `approvalHash` from `src/shared/approval.ts`, not its own copy.
+- A `KUBECONFIG` named in a project's env file is used only when the file is outside the repo. A kubeconfig can run programs through its exec auth block, so a cloned repo must not be able to point the service at its own file.
+- Routes take `dir` (the project folder), never a kubeconfig path, so a block or frame cannot choose one.
+- Watches keep the current objects in memory per (cluster, namespace, kind), so a second frame gets its snapshot without a new list. Secret watches store and push only the redacted object.
+- A watch that fails with `AUTH_EXPIRED`, `FORBIDDEN`, `NOT_FOUND` or `NO_KUBECTL` stops retrying and reports `{ watchId, state: 'error', code }`, so an expired OIDC login cannot keep opening browser tabs. Other failures retry with a backoff up to 30 s.
+- New dependency: `yaml` (service bundle only), for the scope scan and manifest parsing.
+- The `k8s_spike_plugin` tool is still in the plugin. It stays until Phase 7 so the in-app check (does OpenCode call `setup` once per project, and is `ctx.location.directory` right) can still be run there.
+- Left for later phases: `POST /approve` and the agent-side lock check (Phase 7), the per-kind columns and actions in `kinds.ts` (Phase 2), log streams (Phase 3), Sign in routes (Phase 6).
+
+### Phase 2: panel shell and resource browsing (about 3 h) - NEXT
+
+Preact app, both layouts, header pickers, nav, kind registry for every kind in the table above, resource table with live watch, detail drawer with Overview, YAML (read), Events. Empty, loading and every error code drawn. Secrets masked.
+
+Done when: every section lists on the staging cluster at both widths, light and dark, and a pod deleted with kubectl disappears from the table without a refresh.
+
+### Phase 3: actions, logs, shell, forwards (about 3 h)
+
+Action menus, confirm steps, edit with dry-run diff, scale, restart, rollback, cordon, drain, cron trigger, Flux/Argo actions, logs dock, console, copy shell command, port forwards with restore, lock banner and unlock flow, audit log.
+
+Done when: each action works on staging, each is refused on a locked production context, a port forward survives closing the panel and a service restart.
+
+### Phase 4: overviews and metrics (about 2 h)
+
+Cluster overview, workloads overview, metrics-server usage in tables and drawer, Prometheus detection and charts.
+
+Done when: overview numbers match `kubectl top nodes`, charts draw when Prometheus exists and the overview explains what is missing when not.
+
+### Phase 5: Helm, custom resources, GitOps (about 2 h)
+
+Helm releases with values, manifest, history, rollback, upgrade with edited values, uninstall. Chart repo search and install only if time allows (mark as stretch). CRD browser with printer columns. Flux and Argo views when their CRDs exist.
+
+### Phase 6: EKS discovery and sign-in (about 1 h)
+
+Discovery, Add to kubeconfig with confirm, Sign in for SSO and OIDC.
+
+Done when: an expired SSO session shows Sign in, and signing in brings the views back without reopening the panel.
+
+### Phase 7: agent surfaces (about 3 h)
+
+Redaction with tests, Ask agent, mentions with index, instructions, skill, plugin tools with lock and approval flow, the four blocks, tools presentation.
+
+Done when: in a chat, `@` finds a pod and the agent gets redacted text; the agent runs `k8s_get` and `k8s_logs`; `k8s_scale` on production returns Locked, the agent draws `K8sApprove`, Approve lets the retry through once, a second retry is Locked again.
+
+### Phase 8: verify and hand over (about 1 h)
+
+`bun run build`, `bunx openchamber-guest-check`, `bunx tsc --noEmit`, `bun test`. Screenshots with the shared-ui harness (`bun harness/server.ts --root ../k8s ...`), light and dark, 360px and page width, fixtures recorded from staging and kept out of git. README with what it does and where to look. End with the install link:
+
+```markdown
+[Install Kubernetes](openchamber://extensions/install?path=/Users/example/Development/OpenChamber%20Extensions/k8s)
+```
+
+Before editing `../shared-ui/USAGE.md` to add this extension to the Dependents table, ask the user: it is another project.
+
+## Rules for the build
+
+- No em dashes anywhere (code comments, UI strings, docs).
+- Only `--oc-*` colors. No hardcoded hex.
+- Nothing in `../shared-ui` unless a second extension needs it, and then ask first.
+- Never print or log tokens, kubeconfig credentials or Secret values.
+- Quiet: no page polling for data (leases are the only timer), no toast without a click behind it.
+- User words: "Clusters", "Pods", "Sign in", never "service" or "payload".
+
+## Spike results
+
+Phase 0, run on this machine (kubectl v1.37.2, OpenChamber 2.7 desktop, opencode v2.2.7). The service was run with the desktop app's own binary and `ELECTRON_RUN_AS_NODE=1`, with an environment limited to what the host passes (`PATH`, `HOME`, `TMPDIR`, `LANG`, `OPENCHAMBER_*`). The spike routes live in `src/service/spikes.ts`.
+
+| Spike | Result |
+|---|---|
+| a. Service PATH, kubectl | **Pass.** The running services under the app have a `PATH` that already contains `/opt/homebrew/bin` (the app was started from a shell). With a Finder-style `PATH` of `/usr/bin:/bin:/usr/sbin:/sbin` it does not, and the extended `PATH` from `bins.ts` fixes it: `kubectl`, `aws`, `helm` and `kubectl-oidc_login` are all found. `kubectl --context initech-staging-us-east-1 get ns` returns 16 namespaces under both paths (exit 0, aws exec auth works with the extended `PATH`). |
+| b. `kubectl proxy --unix-socket` | **Pass.** Proxy ready in about 100 ms. `GET /api/v1/namespaces` over the socket from Node `http.request({ socketPath })` returned 200 with 16 namespaces (`contracts`, `datadog`, `default`, ...). `GET /apis/metrics.k8s.io/v1beta1/nodes` also returned 200, so metrics-server exists on staging. The socket sits in a `0700` folder and is removed on shutdown. |
+| c. `nw-oidc` user | **kubelogin.** `exec.command` is `kubectl` with args `oidc-login get-token --oidc-issuer-url=https://idp.example.com/oauth2/<issuer-id> --oidc-client-id=<client-id>` and scopes `email`, `offline_access`, `profile`, `openid`. `apiVersion` is `client.authentication.k8s.io/v1beta1`, `interactiveMode` is `IfAvailable`, no `env`. The plugin binary is `/opt/homebrew/bin/kubectl-oidc_login` and a token cache exists in `~/.kube/cache/oidc-login`. Sign in for these contexts runs `kubectl --context X get ns` from the service (kubelogin opens the browser). Not exercised: an expired token, to avoid opening a browser unprompted. |
+| d. OpenCode plugin | **Pass.** Loaded through `OPENCODE_CONFIG_CONTENT` with `opencode run --standalone`. `execute(input, ctx)` can spawn: `await import('node:child_process')` works (`spawnSync('kubectl', ...)` returned the current context), and a `Bun` global exists. The second argument holds `{ sessionID, agent, messageID, id, progress (function), signal }`: **no directory**. The directory comes from `setup(ctx)`: `ctx.location.directory` and `ctx.location.project.{id, directory, canonical}`, which setup can capture in a closure. `ctx.session.get(sessionID)` also exists. `process.cwd()` equals `location.directory` in this run. Phase 7 uses `ctx.location.directory` first, then `process.cwd()`, and must confirm in the app that a shared `opencode serve` calls `setup` once per project. |
+| e. Terminal | **Dropped** by the user. No terminal app is launched or driven. Before the decision, a few Ghostty windows were opened with `open -na Ghostty` and closed again (they were killed by pid; the user's own Ghostty process was not touched). Shell is "Copy shell command" through `host.writeClipboard`. |
+| f. `host.emit` to panel and page | **Pass.** From the `keepRunning` service, `host.emit('spike', ...)` reached both surfaces: after installing and approving, the user pressed Send test events and saw 3 `spike` lines in the rail panel and 3 in the full page. The service also started by itself on approval (`keepRunning`), and the service side was checked against a fake callback listener (`POST /service/call`, `panels.emit`). |
+
+Other findings:
+
+- `bun add preact` installed Preact 11.2 (the manifest draft said `^10`); Linear uses `^11.2.0` too, so the scaffold follows it.
+- `bun init` generated `CLAUDE.md`, `index.ts` and `.cursor/`; they were removed.
+- `bun test` exits 1 with no test files, so the `test` script passes `--pass-with-no-tests` until Phase 1 adds tests.
+- The plugin still ships the `k8s_spike_plugin` tool (it reports runtime facts). Remove it in Phase 1 once the in-app plugin check is recorded.

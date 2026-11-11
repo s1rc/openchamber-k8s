@@ -1,0 +1,93 @@
+{
+  "name": "k8s",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "sh scripts/build.sh",
+    "check": "bunx openchamber-guest-check",
+    "typecheck": "bunx tsc --noEmit -p .",
+    "test": "bun test --pass-with-no-tests"
+  },
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.7.0"
+    },
+    "id": "k8s",
+    "name": "Kubernetes",
+    "icon": "icon.svg",
+    "contributes": {
+      "panel": {
+        "entry": "panel/index.html"
+      },
+      "page": true,
+      "capabilities": ["prompt", "sessions"],
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "keepRunning": true,
+        "permissions": {
+          "exec": ["kubectl", "helm", "aws"]
+        }
+      },
+      "instructions": true,
+      "skills": "skills",
+      "opencodePlugin": "plugin",
+      "mentions": {
+        "label": "Kubernetes"
+      },
+      "blocks": [
+        {
+          "name": "K8sApprove",
+          "description": "Asks the user to approve a write on a locked cluster. Args from the k8s tool's Locked reply",
+          "args": ["context", "namespace", "verb", "target", "summary", "hash"],
+          "entry": "blocks/index.html",
+          "height": 220,
+          "answers": true
+        },
+        {
+          "name": "K8sLogs",
+          "description": "Shows the last lines of a pod's logs. lines: count, max 200",
+          "args": ["context", "namespace", "pod", "container", "lines"],
+          "entry": "blocks/index.html",
+          "height": 240
+        },
+        {
+          "name": "K8sEvents",
+          "description": "Shows recent Kubernetes events for a resource or a namespace",
+          "args": ["context", "namespace", "kind", "name"],
+          "entry": "blocks/index.html",
+          "height": 200
+        },
+        {
+          "name": "K8sPickContext",
+          "description": "Asks which Kubernetes cluster and namespace to use. filter: part of a context name, or empty",
+          "args": ["question", "filter"],
+          "entry": "blocks/index.html",
+          "height": 220,
+          "answers": true
+        }
+      ],
+      "tools": [
+        {
+          "match": "k8s_*",
+          "name": "Kubernetes",
+          "icon": "icon.svg",
+          "title": "{input.kind} {input.name}",
+          "output": "auto"
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "@openchamber-ext/shared-ui": "../shared-ui",
+    "@openchamber/sdk": "2.7.0",
+    "preact": "^11.2.0",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}

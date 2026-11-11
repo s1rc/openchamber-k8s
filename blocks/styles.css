@@ -1,0 +1,50 @@
+/* @openchamber-ext/shared-ui. The only source of the shared CSS.
+   Built on the host's --oc-* variables only. Every class starts with sui-.
+   After editing, run: bun run gen (writes src/styles.gen.ts for the string export). */
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--oc-bg, transparent); }
+
+.sui-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.sui-grow { flex: 1 1 auto; min-width: 0; }
+.sui-muted { color: var(--oc-muted); }
+.sui-small { font-size: 0.78rem; }
+.sui-mono { font-family: var(--oc-mono, ui-monospace, monospace); }
+
+.sui-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--oc-border); border-radius: 999px; color: var(--oc-muted); font-size: 0.78rem; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.sui-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.sui-dot--error { background: var(--oc-error); }
+.sui-dot--warning { background: var(--oc-warning); }
+.sui-dot--info { background: var(--oc-info); }
+.sui-dot--success { background: var(--oc-success); }
+.sui-dot--muted { background: var(--oc-muted); }
+
+.sui-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.sui-card { text-align: left; background: var(--oc-elevated); color: var(--oc-elevated-fg, var(--oc-fg)); border: 1px solid var(--oc-border); border-radius: var(--oc-radius, 8px); padding: 10px 12px; cursor: pointer; font: inherit; display: flex; flex-direction: column; gap: 6px; }
+.sui-card:hover { background: var(--oc-hover); }
+.sui-card[aria-pressed="true"] { border-color: var(--oc-primary); }
+.sui-card--static { cursor: default; }
+.sui-card--static:hover { background: var(--oc-elevated); }
+
+.sui-stat-label { color: var(--oc-muted); font-size: 0.78rem; }
+.sui-stat-value { font-size: 1.5rem; font-weight: 650; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.sui-stat-breakdown { display: flex; gap: 8px; flex-wrap: wrap; font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+.sui-stat-item { display: inline-flex; align-items: center; gap: 4px; }
+
+.sui-section { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--oc-border); border-radius: var(--oc-radius, 8px); background: var(--oc-elevated); }
+.sui-section-title { margin: 0; font-size: 0.95rem; }
+
+.sui-kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
+.sui-kv dt { color: var(--oc-muted); }
+.sui-kv dd { margin: 0; overflow-wrap: anywhere; }
+
+/* Rail panels: stack the cards and compact the stat cards. */
+@media (max-width: 560px) {
+  .sui-cards { grid-template-columns: 1fr; gap: 6px; }
+  .sui-card--stat { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 8px; padding: 8px 10px; }
+  .sui-card--stat .sui-stat-value { font-size: 1.1rem; grid-column: 2; grid-row: 1; }
+  .sui-card--stat .sui-stat-breakdown { grid-column: 1 / -1; grid-row: 2; }
+}
+.k8s-pad { padding: 12px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.k8s-center { display: flex; align-items: center; justify-content: center; min-height: 120px; }
