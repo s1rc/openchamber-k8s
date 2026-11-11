@@ -38,11 +38,14 @@ const BYTE_UNITS: Record<string, number> = {
 export const parseQuantity = (value: unknown): number | null => {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (typeof value !== 'string') return null;
-  const match = /^([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(m|[kKMGTPE]i?)?$/.exec(value.trim());
+  const match = /^([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(m|n|u|[kKMGTPE]i?)?$/.exec(value.trim());
   if (!match) return null;
   const base = Number(match[1]);
   const unit = match[2] ?? '';
+  // metrics-server reports CPU in nanocores (`123456789n`).
   if (unit === 'm') return base / 1000;
+  if (unit === 'u') return base / 1e6;
+  if (unit === 'n') return base / 1e9;
   const factor = BYTE_UNITS[unit];
   return factor === undefined ? null : base * factor;
 };
@@ -63,6 +66,21 @@ export const bytesText = (bytes: number | null | undefined): string => {
 
 /** CPU cores, e.g. `1.93` or `4`. */
 export const coresText = (cores: number | null | undefined): string => (cores === null || cores === undefined ? '' : String(Number(cores.toFixed(2))));
+
+/** CPU for a pod: `12m` below one core, else cores (`1.5`). */
+export const cpuText = (cores: number | null | undefined): string => {
+  if (cores === null || cores === undefined || !Number.isFinite(cores)) return '';
+  return cores < 1 ? `${Math.round(cores * 1000)}m` : String(Number(cores.toFixed(2)));
+};
+
+/** A fraction (0.234) as a whole percent: `23%`. */
+export const percentText = (fraction: number | null | undefined): string => (fraction === null || fraction === undefined || !Number.isFinite(fraction) ? '' : `${Math.round(fraction * 100)}%`);
+
+/** `12.4 MiB/s`. */
+export const rateText = (bytesPerSecond: number | null | undefined): string => {
+  const text = bytesText(bytesPerSecond);
+  return text ? `${text}/s` : '';
+};
 
 /** A string cut to `max` characters, with `...` when it was cut. */
 export const clipText = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 3)}...` : text);

@@ -80,6 +80,7 @@ interface Watch {
   target: Target;
   info: KindInfo;
   namespace: string | null;
+  fieldSelector: string | null;
   store: Map<string, Obj>;
   rv: string;
   leaseAt: number;
@@ -119,7 +120,7 @@ const queueEvent = (w: Watch, event: WatchEvent): void => {
 };
 
 const list = async (w: Watch): Promise<void> => {
-  const answer = await callJson(w.target, { path: kindPath(w.info, w.namespace), timeoutMs: 60_000 });
+  const answer = await callJson(w.target, { path: kindPath(w.info, w.namespace), query: { fieldSelector: w.fieldSelector ?? undefined }, timeoutMs: 60_000 });
   w.store = new Map();
   for (const item of (answer.items ?? []) as Obj[]) {
     const object = prepare(w, item);
@@ -184,7 +185,7 @@ const connect = async (w: Watch): Promise<void> => {
     w.stream = await openStream(
       w.target,
       kindPath(w.info, w.namespace),
-      { watch: 'true', resourceVersion: w.rv, allowWatchBookmarks: 'true', timeoutSeconds: '600' },
+      { watch: 'true', resourceVersion: w.rv, allowWatchBookmarks: 'true', timeoutSeconds: '600', fieldSelector: w.fieldSelector ?? undefined },
       (line) => onLine(w, line),
       (error) => {
         w.stream = null;
@@ -252,9 +253,9 @@ export interface Snapshot {
   resourceVersion: string;
 }
 
-/** Starts, or joins, the watch for this cluster, namespace and kind. Answers the current items first. */
-export const openWatch = async (target: Target, info: KindInfo, namespace: string | null): Promise<Snapshot> => {
-  const key = `${targetKey(target)}|${namespace ?? ''}|${info.group}/${info.plural}`;
+/** Starts, or joins, the watch for this cluster, namespace, kind and field selector. Answers the current items first. */
+export const openWatch = async (target: Target, info: KindInfo, namespace: string | null, fieldSelector: string | null = null): Promise<Snapshot> => {
+  const key = `${targetKey(target)}|${namespace ?? ''}|${info.group}/${info.plural}|${fieldSelector ?? ''}`;
   let w = watches.get(key);
   if (!w || w.closed) {
     const id = `w_${createHash('sha1').update(key).digest('hex').slice(0, 12)}`;
@@ -264,6 +265,7 @@ export const openWatch = async (target: Target, info: KindInfo, namespace: strin
       target,
       info,
       namespace: info.namespaced ? namespace : null,
+      fieldSelector,
       store: new Map(),
       rv: '',
       leaseAt: Date.now(),

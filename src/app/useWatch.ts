@@ -14,6 +14,8 @@ export interface WatchSpec {
   namespace: string;
   kind: string;
   dir: string | null;
+  /** Only objects the cluster says match, e.g. `type=Warning` for events. */
+  fieldSelector?: string;
 }
 
 export interface WatchView {
@@ -45,7 +47,7 @@ export const useWatch = (spec: WatchSpec | null): WatchView => {
   const bump = (): void => setTick((n) => n + 1);
   const holder = useRef<Holder>({ phase: 'loading', error: null, live: 'connecting', map: new Map(), info: null });
   const reloadRef = useRef<() => void>(() => undefined);
-  const key = spec ? `${spec.context}|${spec.namespace}|${spec.kind}|${spec.dir ?? ''}` : '';
+  const key = spec ? `${spec.context}|${spec.namespace}|${spec.kind}|${spec.dir ?? ''}|${spec.fieldSelector ?? ''}` : '';
 
   useEffect(() => {
     holder.current = { phase: 'loading', error: null, live: 'connecting', map: new Map(), info: null };
@@ -97,7 +99,7 @@ export const useWatch = (spec: WatchSpec | null): WatchView => {
 
     const open = async (): Promise<void> => {
       const mine = ++attempt;
-      const reply = await call('POST', '/watch', { context: spec.context, namespace: spec.namespace, kind: spec.kind, dir: spec.dir });
+      const reply = await call('POST', '/watch', { context: spec.context, namespace: spec.namespace, kind: spec.kind, dir: spec.dir, fieldSelector: spec.fieldSelector });
       if (cancelled || mine !== attempt) return;
       const h = holder.current;
       if (!reply.ok) {

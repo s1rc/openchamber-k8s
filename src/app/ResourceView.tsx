@@ -1,11 +1,13 @@
 import type { ComponentChildren } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { cellText, findKind, rowText, sortRows, statusOf, viewFor, type KindInfo, type Tone } from '../shared/kinds.ts';
+import { cellText, findKind, rowText, sortRows, statusOf, viewFor, type KindInfo, type Tone, type ViewContext } from '../shared/kinds.ts';
 import type { Obj } from '../shared/types.ts';
 import { Drawer } from './detail/Drawer.tsx';
 import { ErrorState } from './errors.tsx';
 import { Empty, List, SearchField, Spinner } from './kit.tsx';
 import { Table, type SortState } from './Table.tsx';
+import { UsageBar } from './UsageBar.tsx';
+import { useUsage } from './useUsage.ts';
 import { useWatch, type Live } from './useWatch.ts';
 
 interface Props {
@@ -31,6 +33,10 @@ const badgeTone = (tone: Tone): 'success' | 'warning' | 'error' | 'info' | 'neut
 
 export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLive, onOpenLogs, onOpenConsole }: Props) => {
   const watch = useWatch({ context, namespace, kind, dir });
+  // Nodes and pods show usage from metrics-server next to their numbers.
+  const wantsUsage = kind === 'Node' || kind === 'Pod';
+  const usageView = useUsage({ context, dir, namespace: kind === 'Pod' ? namespace : '_all', nodes: kind === 'Node', pods: kind === 'Pod', disk: kind === 'Node', enabled: wantsUsage });
+  const ctx = useMemo<ViewContext | undefined>(() => (wantsUsage ? { usage: usageView.usage } : undefined), [wantsUsage, usageView.usage]);
   const fallback = findKind(kind);
   const info: Pick<KindInfo, 'kind' | 'group' | 'namespaced'> = watch.info ?? fallback ?? { kind, group: '', namespaced: true };
   const view = viewFor(info);
@@ -49,8 +55,8 @@ export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLi
   const rows = useMemo(() => {
     const needle = query.trim().toLowerCase();
     const matching = needle ? watch.items.filter((object) => rowText(view, object).includes(needle)) : watch.items;
-    return sortRows(matching, view, sort.column, sort.dir);
-  }, [watch.items, view, sort, query]);
+    return sortRows(matching, view, sort.column, sort.dir, ctx);
+  }, [watch.items, view, sort, query, ctx]);
 
   const onSort = (column: string): void => setSort((current) => (current.column === column ? { column, dir: current.dir === 'asc' ? 'desc' : 'asc' } : { column, dir: 'asc' }));
 
@@ -86,7 +92,7 @@ export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLi
   } else if (rows.length === 0) {
     body = <div class="k8s-pad"><Empty title="No matches" body={`Nothing matches "${query.trim()}".`} action={{ label: 'Clear search', onClick: () => setQuery('') }} /></div>;
   } else if (layout === 'page') {
-    body = <Table view={view} columns={columns} rows={rows} sort={sort} onSort={onSort} selectedKey={selectedKey} onSelect={setSelectedKey} now={now} />;
+    body = <Table view={view} columns={columns} rows={rows} sort={sort} onSort={onSort} selectedKey={selectedKey} onSelect={setSelectedKey} now={now} ctx={ctx} />;
   } else {
     const railColumn = view.columns.find((c) => c.id === (view.railColumn ?? 'age')) ?? view.columns[view.columns.length - 1]!;
     const showNamespace = info.namespaced && namespace === '_all';
@@ -98,7 +104,7 @@ export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLi
           onSelect={setSelectedKey}
           items={rows.slice(0, RAIL_MAX).map((object) => {
             const status = statusOf(view, object);
-            const meta = cellText(railColumn, object, now);
+            const meta = cellText(railColumn, object, now, ctx);
             return {
               id: `${object.metadata?.namespace ?? ''}/${object.metadata?.name ?? ''}`,
               title: view.railTitle?.(object) ?? String(object.metadata?.name ?? ''),
@@ -123,6 +129,7 @@ export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLi
       dir={dir}
       namespace={namespace}
       now={now}
+      usage={wantsUsage ? usageView.usage : null}
       onClose={close}
       rail={layout === 'rail'}
       onOpenLogs={onOpenLogs}
@@ -138,6 +145,7 @@ export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLi
           {lead}
           <SearchField value={query} onChange={setQuery} placeholder={`Search ${view.title.toLowerCase()}`} />
           {count ? <span class="sui-muted sui-small">{`${count} ${view.title.toLowerCase()}`}</span> : null}
+          {wantsUsage && watch.phase === 'ready' ? <UsageBar view={usageView} /> : null}
         </div>
         <div class="k8s-scroll">{body}</div>
       </div>
@@ -150,6 +158,7 @@ export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLi
         <div class="k8s-toolbar">
           <h2 class="k8s-title">{view.title}</h2>
           {count ? <span class="sui-muted sui-small">{count}</span> : null}
+          {wantsUsage && watch.phase === 'ready' ? <UsageBar view={usageView} /> : null}
           <span class="k8s-push k8s-search"><SearchField value={query} onChange={setQuery} placeholder={`Search ${view.title.toLowerCase()}`} /></span>
         </div>
         <div class="k8s-scroll k8s-scroll--table">{body}</div>

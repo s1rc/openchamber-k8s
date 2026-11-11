@@ -3,9 +3,11 @@ import { Chip, Dot, KV, Section } from '@openchamber-ext/shared-ui/preact';
 import { ageText, clipText } from '../../shared/format.ts';
 import { podSpecOf, statusOf, timeOf, type KindView } from '../../shared/kinds.ts';
 import { nodeShellCommand, SHELL_COPIED, shellCommand } from '../../shared/shell.ts';
+import type { UsageSet } from '../../shared/metrics.ts';
 import type { Obj } from '../../shared/types.ts';
 import { host, notify } from '../host.ts';
 import { Button } from '../kit.tsx';
+import { UsageSection } from './UsageSection.tsx';
 
 interface Props {
   object: Obj;
@@ -13,6 +15,7 @@ interface Props {
   now: number;
   context: string;
   namespace: string;
+  usage?: UsageSet | null;
 }
 
 const arr = (value: unknown): Obj[] => (Array.isArray(value) ? (value as Obj[]) : []);
@@ -155,7 +158,7 @@ const SecretKeys = ({ object }: { object: Obj }) => {
 
 const when = (ms: number | null, now: number): string => (ms === null ? '' : `${new Date(ms).toLocaleString()} (${ageText(ms, now)} ago)`);
 
-export const Overview = ({ object, view, now, context, namespace }: Props) => {
+export const Overview = ({ object, view, now, context, namespace, usage }: Props) => {
   const meta = object.metadata ?? {};
   const status = statusOf(view, object);
   const owners = arr(meta.ownerReferences);
@@ -175,6 +178,7 @@ export const Overview = ({ object, view, now, context, namespace }: Props) => {
       <Section>
         <KV items={rows} />
       </Section>
+      {usage && (object.kind === 'Pod' || object.kind === 'Node') ? <UsageSection object={object} usage={usage} /> : null}
       {shellText ? (
         <Section title="Shell">
           <div class="sui-muted sui-small">Paste this in OpenChamber's terminal to open a shell. The panel never opens a terminal itself.</div>

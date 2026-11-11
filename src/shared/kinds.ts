@@ -1,6 +1,7 @@
 // Kind registry. The first half holds API paths (used by the service); the second half holds what the panel shows
 // for each kind: columns, status, sorting and overview details. Actions arrive in Phase 3.
-import { ageText, bytesText, coresText, parseQuantity } from './format.ts';
+import { ageText, bytesText, coresText, cpuText, parseQuantity } from './format.ts';
+import { podUsageKey, type UsageSet } from './metrics.ts';
 import type { Obj } from './types.ts';
 
 export interface KindInfo {
@@ -101,15 +102,28 @@ export interface StatusInfo {
 }
 
 /** How the table draws a cell. `age` cells hold a time in ms and show `3d4h`; `status` cells use the view's status function. */
-export type CellKind = 'text' | 'mono' | 'age' | 'status' | 'containers';
+export type CellKind = 'text' | 'mono' | 'age' | 'status' | 'containers' | 'meter';
+
+/** What a column may need besides the object: the live numbers from metrics-server. */
+export interface ViewContext {
+  usage?: UsageSet | null;
+}
+
+/** A usage cell: the text, and how full it is (0 to 1) when the cluster gave numbers. */
+export interface Meter {
+  text: string;
+  fraction: number | null;
+}
 
 export interface Column {
   id: string;
   label: string;
   /** The text shown, or a number. Age cells return the time in epoch ms. */
-  get: (object: Obj) => string | number | null;
+  get: (object: Obj, ctx?: ViewContext) => string | number | null;
   /** What to sort by when the shown text does not sort right (sizes, versions). */
-  sort?: (object: Obj) => string | number | null;
+  sort?: (object: Obj, ctx?: ViewContext) => string | number | null;
+  /** For `meter` cells: the bar under the text. Null draws the text alone. */
+  meter?: (object: Obj, ctx?: ViewContext) => Meter | null;
   cell?: CellKind;
   /** A CSS grid track, e.g. `minmax(120px, 1fr)`. */
   width?: string;
@@ -268,6 +282,35 @@ const nodeStatus = (node: Obj): StatusInfo => {
 
 const nodeAddress = (node: Obj, type: string): string => text(arr(node.status?.addresses).find((a) => a.type === type)?.address);
 
+const nodeUse = (node: Obj, ctx?: ViewContext) => ctx?.usage?.nodes.get(text(node.metadata?.name));
+const podUse = (pod: Obj, ctx?: ViewContext) => ctx?.usage?.pods.get(podUsageKey(text(pod.metadata?.namespace), text(pod.metadata?.name)));
+
+/**
+ * The text of a node's CPU, memory or disk cell. With usage it is `used / size`; a node that metrics-server has not
+ * measured yet shows `- / size`, so a bare size is never mistaken for usage. Without usage it is the allocatable size.
+ */
+const nodeCell = (node: Obj, ctx: ViewContext | undefined, what: 'cpu' | 'memory' | 'disk'): string => {
+  const meter = nodeMeter(node, ctx, what);
+  if (meter) return meter.text;
+  const size = what === 'cpu' ? coresText(quantityValue(node.status?.allocatable?.cpu)) : bytesText(quantityValue(node.status?.allocatable?.[what === 'memory' ? 'memory' : 'ephemeral-storage']));
+  const measuring = ctx?.usage?.status === 'ok' && (what !== 'disk' || ctx.usage.diskStatus === 'ok');
+  return measuring && size ? `- / ${size}` : size;
+};
+
+/** `used / size` and how full it is, for a node's CPU, memory or disk. Null when metrics-server gave no number. */
+export const nodeMeter = (node: Obj, ctx: ViewContext | undefined, what: 'cpu' | 'memory' | 'disk'): Meter | null => {
+  const use = nodeUse(node, ctx);
+  if (!use) return null;
+  if (what === 'disk') {
+    if (use.diskUsed === null || use.diskCapacity === null || !(use.diskCapacity > 0)) return null;
+    return { text: `${bytesText(use.diskUsed)} / ${bytesText(use.diskCapacity)}`, fraction: use.diskUsed / use.diskCapacity };
+  }
+  const used = what === 'cpu' ? use.cpu : use.memory;
+  const size = quantityValue(node.status?.allocatable?.[what]);
+  if (used === null || size === null || !(size > 0)) return null;
+  return what === 'cpu' ? { text: `${coresText(used)} / ${coresText(size)}`, fraction: used / size } : { text: `${bytesText(used)} / ${bytesText(size)}`, fraction: used / size };
+};
+
 // ----- Network and storage
 
 const servicePorts = (service: Obj): string =>
@@ -339,6 +382,8 @@ const VIEWS: Record<string, KindView> = {
       NAME,
       NAMESPACE,
       col('containers', 'Containers', (o) => arr(o.spec?.containers).length, { cell: 'containers', width: '88px' }),
+      num('cpu', 'CPU', (o, ctx) => cpuText(podUse(o, ctx)?.cpu), { sort: (o, ctx) => podUse(o, ctx)?.cpu ?? null, hint: 'Current usage from metrics-server' }),
+      num('memory', 'Memory', (o, ctx) => bytesText(podUse(o, ctx)?.memory), { sort: (o, ctx) => podUse(o, ctx)?.memory ?? null, width: '84px', hint: 'Current usage from metrics-server' }),
       num('restarts', 'Restarts', (o) => restarts(o)),
       col('controlledBy', 'Controlled by', (o) => text(owner(o)?.kind), { width: 'minmax(80px, 1fr)' }),
       col('node', 'Node', (o) => text(o.spec?.nodeName), { width: 'minmax(110px, 1.5fr)' }),
@@ -356,9 +401,27 @@ const VIEWS: Record<string, KindView> = {
     'Nodes',
     [
       NAME,
-      num('cpu', 'CPU', (o) => coresText(quantityValue(o.status?.allocatable?.cpu)), { sort: (o) => quantityValue(o.status?.allocatable?.cpu), hint: 'Allocatable. Usage arrives with metrics.' }),
-      num('memory', 'Memory', (o) => bytesText(quantityValue(o.status?.allocatable?.memory)), { sort: (o) => quantityValue(o.status?.allocatable?.memory), width: '90px', hint: 'Allocatable. Usage arrives with metrics.' }),
-      num('disk', 'Disk', (o) => bytesText(quantityValue(o.status?.allocatable?.['ephemeral-storage'])), { sort: (o) => quantityValue(o.status?.allocatable?.['ephemeral-storage']), width: '90px', hint: 'Allocatable' }),
+      num('cpu', 'CPU', (o, ctx) => nodeCell(o, ctx, 'cpu'), {
+        cell: 'meter',
+        meter: (o, ctx) => nodeMeter(o, ctx, 'cpu'),
+        sort: (o, ctx) => (nodeUse(o, ctx)?.cpu ?? quantityValue(o.status?.allocatable?.cpu)),
+        width: '120px',
+        hint: 'Cores in use of allocatable (from metrics-server). Allocatable only when there is no usage.',
+      }),
+      num('memory', 'Memory', (o, ctx) => nodeCell(o, ctx, 'memory'), {
+        cell: 'meter',
+        meter: (o, ctx) => nodeMeter(o, ctx, 'memory'),
+        sort: (o, ctx) => (nodeUse(o, ctx)?.memory ?? quantityValue(o.status?.allocatable?.memory)),
+        width: '150px',
+        hint: 'Memory in use of allocatable (from metrics-server). Allocatable only when there is no usage.',
+      }),
+      num('disk', 'Disk', (o, ctx) => nodeCell(o, ctx, 'disk'), {
+        cell: 'meter',
+        meter: (o, ctx) => nodeMeter(o, ctx, 'disk'),
+        sort: (o, ctx) => (nodeUse(o, ctx)?.diskUsed ?? quantityValue(o.status?.allocatable?.['ephemeral-storage'])),
+        width: '150px',
+        hint: 'Root disk used of its size (read from the kubelet). Allocatable only when that is not readable.',
+      }),
       num('taints', 'Taints', (o) => arr(o.spec?.taints).length),
       col('roles', 'Roles', (o) => nodeRoles(o), { width: 'minmax(80px, 1fr)' }),
       col('version', 'Version', (o) => text(o.status?.nodeInfo?.kubeletVersion), { width: 'minmax(130px, 1fr)' }),
@@ -367,7 +430,7 @@ const VIEWS: Record<string, KindView> = {
     ],
     {
       status: nodeStatus,
-      railColumn: 'version',
+      railColumn: 'cpu',
       details: (o) => {
         const info = o.status?.nodeInfo ?? {};
         return kv(
@@ -603,8 +666,8 @@ export const viewFor = (info: Pick<KindInfo, 'kind' | 'group' | 'namespaced'>): 
 export const statusOf = (view: KindView, object: Obj): StatusInfo | null => (view.status ? view.status(object) : null);
 
 /** A cell as text. Ages need the current time. */
-export const cellText = (column: Column, object: Obj, now: number): string => {
-  const value = column.get(object);
+export const cellText = (column: Column, object: Obj, now: number, ctx?: ViewContext): string => {
+  const value = column.get(object, ctx);
   if (column.cell === 'age') return typeof value === 'number' ? ageText(value, now) : '';
   return value === null ? '' : String(value);
 };
@@ -620,14 +683,14 @@ export const rowText = (view: KindView, object: Obj): string =>
 const empty = (value: string | number | null): boolean => value === null || value === '';
 
 /** Sorted copy. Empty cells go last whichever way it sorts. Age sorts youngest first when `asc`. */
-export const sortRows = (rows: Obj[], view: KindView, columnId: string, dir: 'asc' | 'desc'): Obj[] => {
+export const sortRows = (rows: Obj[], view: KindView, columnId: string, dir: 'asc' | 'desc', ctx?: ViewContext): Obj[] => {
   const column = view.columns.find((c) => c.id === columnId) ?? view.columns[0]!;
   const sign = (dir === 'asc' ? 1 : -1) * (column.cell === 'age' ? -1 : 1);
   const by = column.sort ?? column.get;
   const tie = (a: Obj, b: Obj): number => `${text(a.metadata?.namespace)}/${text(a.metadata?.name)}`.localeCompare(`${text(b.metadata?.namespace)}/${text(b.metadata?.name)}`);
   return [...rows].sort((a, b) => {
-    const x = by(a);
-    const y = by(b);
+    const x = by(a, ctx);
+    const y = by(b, ctx);
     if (empty(x) && empty(y)) return tie(a, b);
     if (empty(x)) return 1;
     if (empty(y)) return -1;
@@ -647,14 +710,27 @@ export interface NavSection {
   id: string;
   title: string;
   items: NavItem[];
+  /** Draw the section title even with one item (the two Overview entries would read the same without it). */
+  heading?: boolean;
 }
 
 const item = (kind: string): NavItem => ({ kind, title: VIEWS[kind]?.title ?? `${kind}s` });
 
-/** Lens order. Overview, Helm, GitOps and port forwarding join in later phases. */
+/** Navigation entries that are drawn by the panel itself, not listed from the cluster. */
+export const CLUSTER_OVERVIEW = 'ClusterOverview';
+export const WORKLOADS_OVERVIEW = 'WorkloadsOverview';
+export const OVERVIEW_KINDS: ReadonlySet<string> = new Set([CLUSTER_OVERVIEW, WORKLOADS_OVERVIEW]);
+export const SPECIAL_KINDS: ReadonlySet<string> = new Set([CLUSTER_OVERVIEW, WORKLOADS_OVERVIEW, 'PortForwards']);
+
+/** Lens order. Helm and GitOps join in a later phase. */
 export const NAV: NavSection[] = [
+  { id: 'cluster', title: 'Cluster', heading: true, items: [{ kind: CLUSTER_OVERVIEW, title: 'Overview' }] },
   { id: 'nodes', title: 'Nodes', items: [item('Node')] },
-  { id: 'workloads', title: 'Workloads', items: ['Pod', 'Deployment', 'DaemonSet', 'StatefulSet', 'ReplicaSet', 'Job', 'CronJob'].map(item) },
+  {
+    id: 'workloads',
+    title: 'Workloads',
+    items: [{ kind: WORKLOADS_OVERVIEW, title: 'Overview' }, ...['Pod', 'Deployment', 'DaemonSet', 'StatefulSet', 'ReplicaSet', 'Job', 'CronJob'].map(item)],
+  },
   {
     id: 'config',
     title: 'Config',
@@ -669,7 +745,7 @@ export const NAV: NavSection[] = [
   { id: 'forwards', title: 'Port forwarding', items: [{ kind: 'PortForwards', title: 'Port forwarding' }] },
 ];
 
-export const DEFAULT_KIND = 'Pod';
+export const DEFAULT_KIND = CLUSTER_OVERVIEW;
 
 /** Section title and item title for a kind, e.g. `Workloads` and `Pods`. */
 export const navLabel = (kind: string): { section: string; title: string } | null => {

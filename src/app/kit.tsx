@@ -1,6 +1,6 @@
 import {
-  mountBadge, mountBanner, mountButton, mountEmpty, mountList, mountMenu, mountSearchField, mountSelect, mountSpinner, mountSwitch, mountTabs, mountTextField,
-  type BadgeProps, type BannerProps, type ButtonProps, type CheckboxProps, type EmptyProps, type ListProps, type MenuProps, type SearchFieldProps, type SelectProps, type SpinnerProps,
+  mountBadge, mountBanner, mountButton, mountEmpty, mountList, mountMenu, mountProgress, mountSearchField, mountSelect, mountSpinner, mountSwitch, mountTabs, mountTextField,
+  type BadgeProps, type BannerProps, type ButtonProps, type CheckboxProps, type EmptyProps, type ListProps, type MenuProps, type ProgressProps, type SearchFieldProps, type SelectProps, type SpinnerProps,
   type TabsProps, type TextFieldProps,
 } from '@openchamber/sdk/ui';
 import { useKit, type Mount } from '@openchamber-ext/shared-ui/preact';
@@ -23,3 +23,4 @@ export const List = wrap<ListProps>(mountList, 'block');
 export const Switch = wrap<CheckboxProps>(mountSwitch);
 export const TextField = wrap<TextFieldProps>(mountTextField, 'block');
 export const Menu = wrap<MenuProps>(mountMenu);
+export const Progress = wrap<ProgressProps>(mountProgress, 'block');

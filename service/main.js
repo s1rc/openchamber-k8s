@@ -6945,7 +6945,7 @@ var require_public_api = __commonJS(function(exports) {
 });
 
 // src/service/main.ts
-import http2 from "node:http";
+import http3 from "node:http";
 // node_modules/@openchamber/sdk/dist/scrollbar-style.js
 var GUEST_SCROLLING_ATTRIBUTE = "data-oc-scrolling";
 var GUEST_SCROLLBAR_CSS = `
@@ -7539,13 +7539,17 @@ var parseQuantity = (value) => {
     return Number.isFinite(value) ? value : null;
   if (typeof value !== "string")
     return null;
-  const match = /^([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(m|[kKMGTPE]i?)?$/.exec(value.trim());
+  const match = /^([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(m|n|u|[kKMGTPE]i?)?$/.exec(value.trim());
   if (!match)
     return null;
   const base = Number(match[1]);
   const unit = match[2] ?? "";
   if (unit === "m")
     return base / 1000;
+  if (unit === "u")
+    return base / 1e6;
+  if (unit === "n")
+    return base / 1e9;
   const factor = BYTE_UNITS[unit];
   return factor === undefined ? null : base * factor;
 };
@@ -7563,6 +7567,54 @@ var bytesText = (bytes) => {
   return `${Number(value.toFixed(digits))} ${units[at]}`;
 };
 var coresText = (cores) => cores === null || cores === undefined ? "" : String(Number(cores.toFixed(2)));
+var cpuText = (cores) => {
+  if (cores === null || cores === undefined || !Number.isFinite(cores))
+    return "";
+  return cores < 1 ? `${Math.round(cores * 1000)}m` : String(Number(cores.toFixed(2)));
+};
+
+// src/shared/metrics.ts
+var podUsageKey = (namespace, name) => `${namespace}/${name}`;
+var num = (value) => parseQuantity(value);
+var timeOf = (value) => {
+  if (typeof value !== "string")
+    return null;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? at : null;
+};
+var compactNodeMetrics = (list) => (list.items ?? []).map((item) => ({
+  name: String(item.metadata?.name ?? ""),
+  cpu: num(item.usage?.cpu),
+  memory: num(item.usage?.memory),
+  at: timeOf(item.timestamp)
+})).filter((row) => row.name);
+var sum = (values) => {
+  let total = 0;
+  let any = false;
+  for (const value of values) {
+    if (value === null)
+      continue;
+    total += value;
+    any = true;
+  }
+  return any ? total : null;
+};
+var compactPodMetrics = (list) => (list.items ?? []).map((item) => {
+  const containers = Array.isArray(item.containers) ? item.containers : [];
+  return {
+    namespace: String(item.metadata?.namespace ?? ""),
+    name: String(item.metadata?.name ?? ""),
+    cpu: sum(containers.map((c) => num(c.usage?.cpu))),
+    memory: sum(containers.map((c) => num(c.usage?.memory))),
+    at: timeOf(item.timestamp)
+  };
+}).filter((row) => row.name);
+var kubeletDisk = (summary) => {
+  const fs = summary.node?.fs;
+  const used = typeof fs?.usedBytes === "number" ? fs.usedBytes : null;
+  const capacity = typeof fs?.capacityBytes === "number" ? fs.capacityBytes : null;
+  return used !== null && capacity !== null && capacity > 0 ? { used, capacity } : null;
+};
 
 // src/shared/kinds.ts
 var k = (kind, plural, group, version, namespaced, aliases = []) => ({
@@ -7636,7 +7688,7 @@ var arr = (value) => Array.isArray(value) ? value : [];
 var text = (value) => value === undefined || value === null ? "" : String(value);
 var count = (value) => typeof value === "number" && Number.isFinite(value) ? value : 0;
 var keysOf = (value) => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value) : [];
-var timeOf = (value) => {
+var timeOf2 = (value) => {
   if (typeof value !== "string")
     return null;
   const at = Date.parse(value);
@@ -7759,6 +7811,31 @@ var nodeStatus = (node) => {
   return pressure.length > 0 ? st(pressure.join(", "), "warning") : st("Ready", "success");
 };
 var nodeAddress = (node, type) => text(arr(node.status?.addresses).find((a) => a.type === type)?.address);
+var nodeUse = (node, ctx) => ctx?.usage?.nodes.get(text(node.metadata?.name));
+var podUse = (pod, ctx) => ctx?.usage?.pods.get(podUsageKey(text(pod.metadata?.namespace), text(pod.metadata?.name)));
+var nodeCell = (node, ctx, what) => {
+  const meter = nodeMeter(node, ctx, what);
+  if (meter)
+    return meter.text;
+  const size = what === "cpu" ? coresText(quantityValue(node.status?.allocatable?.cpu)) : bytesText(quantityValue(node.status?.allocatable?.[what === "memory" ? "memory" : "ephemeral-storage"]));
+  const measuring = ctx?.usage?.status === "ok" && (what !== "disk" || ctx.usage.diskStatus === "ok");
+  return measuring && size ? `- / ${size}` : size;
+};
+var nodeMeter = (node, ctx, what) => {
+  const use = nodeUse(node, ctx);
+  if (!use)
+    return null;
+  if (what === "disk") {
+    if (use.diskUsed === null || use.diskCapacity === null || !(use.diskCapacity > 0))
+      return null;
+    return { text: `${bytesText(use.diskUsed)} / ${bytesText(use.diskCapacity)}`, fraction: use.diskUsed / use.diskCapacity };
+  }
+  const used = what === "cpu" ? use.cpu : use.memory;
+  const size = quantityValue(node.status?.allocatable?.[what]);
+  if (used === null || size === null || !(size > 0))
+    return null;
+  return what === "cpu" ? { text: `${coresText(used)} / ${coresText(size)}`, fraction: used / size } : { text: `${bytesText(used)} / ${bytesText(size)}`, fraction: used / size };
+};
 var servicePorts = (service) => arr(service.spec?.ports).map((p) => `${text(p.port)}${p.nodePort ? `:${text(p.nodePort)}` : ""}/${text(p.protocol) || "TCP"}`).join(", ");
 var loadBalancers = (object) => arr(object.status?.loadBalancer?.ingress).map((i) => text(i.hostname || i.ip)).filter(Boolean);
 var externalIp = (service) => {
@@ -7792,7 +7869,7 @@ var hpaMetrics = (hpa) => {
   return more(parts, 2);
 };
 var subjects = (binding) => more(arr(binding.subjects).map((s) => `${text(s.kind)}:${text(s.name)}`), 2);
-var eventTime = (event) => timeOf(event.lastTimestamp) ?? timeOf(event.series?.lastObservedTime) ?? timeOf(event.eventTime) ?? timeOf(event.firstTimestamp) ?? timeOf(event.metadata?.creationTimestamp);
+var eventTime = (event) => timeOf2(event.lastTimestamp) ?? timeOf2(event.series?.lastObservedTime) ?? timeOf2(event.eventTime) ?? timeOf2(event.firstTimestamp) ?? timeOf2(event.metadata?.creationTimestamp);
 var involved = (event) => {
   const ref = event.involvedObject ?? event.regarding;
   return ref ? `${text(ref.kind)}/${text(ref.name)}` : "";
@@ -7800,16 +7877,18 @@ var involved = (event) => {
 var col = (id, label, get, extra = {}) => ({ id, label, get, ...extra });
 var NAME = col("name", "Name", (o) => text(o.metadata?.name), { width: "minmax(150px, 2.4fr)" });
 var NAMESPACE = col("namespace", "Namespace", (o) => text(o.metadata?.namespace), { width: "minmax(90px, 1fr)" });
-var AGE = col("age", "Age", (o) => timeOf(o.metadata?.creationTimestamp), { cell: "age", width: "56px", align: "end" });
+var AGE = col("age", "Age", (o) => timeOf2(o.metadata?.creationTimestamp), { cell: "age", width: "56px", align: "end" });
 var status = (fn, label = "Status") => col("status", label, (o) => fn(o).label, { cell: "status", width: "minmax(90px, 1.1fr)" });
-var num = (id, label, get, extra = {}) => col(id, label, get, { width: "64px", align: "end", ...extra });
+var num2 = (id, label, get, extra = {}) => col(id, label, get, { width: "64px", align: "end", ...extra });
 var view = (title, columns, extra = {}) => ({ title, columns, sort: { column: "name", dir: "asc" }, ...extra });
 var VIEWS = {
   Pod: view("Pods", [
     NAME,
     NAMESPACE,
     col("containers", "Containers", (o) => arr(o.spec?.containers).length, { cell: "containers", width: "88px" }),
-    num("restarts", "Restarts", (o) => restarts(o)),
+    num2("cpu", "CPU", (o, ctx) => cpuText(podUse(o, ctx)?.cpu), { sort: (o, ctx) => podUse(o, ctx)?.cpu ?? null, hint: "Current usage from metrics-server" }),
+    num2("memory", "Memory", (o, ctx) => bytesText(podUse(o, ctx)?.memory), { sort: (o, ctx) => podUse(o, ctx)?.memory ?? null, width: "84px", hint: "Current usage from metrics-server" }),
+    num2("restarts", "Restarts", (o) => restarts(o)),
     col("controlledBy", "Controlled by", (o) => text(owner(o)?.kind), { width: "minmax(80px, 1fr)" }),
     col("node", "Node", (o) => text(o.spec?.nodeName), { width: "minmax(110px, 1.5fr)" }),
     col("qos", "QoS", (o) => text(o.status?.qosClass), { width: "80px" }),
@@ -7822,17 +7901,35 @@ var VIEWS = {
   }),
   Node: view("Nodes", [
     NAME,
-    num("cpu", "CPU", (o) => coresText(quantityValue(o.status?.allocatable?.cpu)), { sort: (o) => quantityValue(o.status?.allocatable?.cpu), hint: "Allocatable. Usage arrives with metrics." }),
-    num("memory", "Memory", (o) => bytesText(quantityValue(o.status?.allocatable?.memory)), { sort: (o) => quantityValue(o.status?.allocatable?.memory), width: "90px", hint: "Allocatable. Usage arrives with metrics." }),
-    num("disk", "Disk", (o) => bytesText(quantityValue(o.status?.allocatable?.["ephemeral-storage"])), { sort: (o) => quantityValue(o.status?.allocatable?.["ephemeral-storage"]), width: "90px", hint: "Allocatable" }),
-    num("taints", "Taints", (o) => arr(o.spec?.taints).length),
+    num2("cpu", "CPU", (o, ctx) => nodeCell(o, ctx, "cpu"), {
+      cell: "meter",
+      meter: (o, ctx) => nodeMeter(o, ctx, "cpu"),
+      sort: (o, ctx) => nodeUse(o, ctx)?.cpu ?? quantityValue(o.status?.allocatable?.cpu),
+      width: "120px",
+      hint: "Cores in use of allocatable (from metrics-server). Allocatable only when there is no usage."
+    }),
+    num2("memory", "Memory", (o, ctx) => nodeCell(o, ctx, "memory"), {
+      cell: "meter",
+      meter: (o, ctx) => nodeMeter(o, ctx, "memory"),
+      sort: (o, ctx) => nodeUse(o, ctx)?.memory ?? quantityValue(o.status?.allocatable?.memory),
+      width: "150px",
+      hint: "Memory in use of allocatable (from metrics-server). Allocatable only when there is no usage."
+    }),
+    num2("disk", "Disk", (o, ctx) => nodeCell(o, ctx, "disk"), {
+      cell: "meter",
+      meter: (o, ctx) => nodeMeter(o, ctx, "disk"),
+      sort: (o, ctx) => nodeUse(o, ctx)?.diskUsed ?? quantityValue(o.status?.allocatable?.["ephemeral-storage"]),
+      width: "150px",
+      hint: "Root disk used of its size (read from the kubelet). Allocatable only when that is not readable."
+    }),
+    num2("taints", "Taints", (o) => arr(o.spec?.taints).length),
     col("roles", "Roles", (o) => nodeRoles(o), { width: "minmax(80px, 1fr)" }),
     col("version", "Version", (o) => text(o.status?.nodeInfo?.kubeletVersion), { width: "minmax(130px, 1fr)" }),
     AGE,
     status(nodeStatus, "Conditions")
   ], {
     status: nodeStatus,
-    railColumn: "version",
+    railColumn: "cpu",
     details: (o) => {
       const info = o.status?.nodeInfo ?? {};
       return kv(["Roles", nodeRoles(o)], ["Kubelet", info.kubeletVersion], ["OS image", info.osImage], ["Kernel", info.kernelVersion], ["Container runtime", info.containerRuntimeVersion], ["Architecture", info.architecture], ["Internal IP", nodeAddress(o, "InternalIP")], ["External IP", nodeAddress(o, "ExternalIP")], ["Hostname", nodeAddress(o, "Hostname")], ["Provider ID", o.spec?.providerID], ["CPU", `${text(o.status?.allocatable?.cpu)} allocatable of ${text(o.status?.capacity?.cpu)}`], ["Memory", `${bytesText(quantityValue(o.status?.allocatable?.memory))} allocatable of ${bytesText(quantityValue(o.status?.capacity?.memory))}`], ["Pods", `${text(o.status?.allocatable?.pods)} allocatable`], ["Taints", arr(o.spec?.taints).map((t) => `${text(t.key)}${t.value ? `=${text(t.value)}` : ""}:${text(t.effect)}`).join(", ")]);
@@ -7841,8 +7938,8 @@ var VIEWS = {
   Deployment: view("Deployments", [
     NAME,
     NAMESPACE,
-    num("pods", "Pods", (o) => ratio(o.status?.readyReplicas, o.spec?.replicas ?? 1), { sort: (o) => count(o.status?.readyReplicas), width: "80px" }),
-    num("replicas", "Replicas", (o) => count(o.spec?.replicas ?? 1)),
+    num2("pods", "Pods", (o) => ratio(o.status?.readyReplicas, o.spec?.replicas ?? 1), { sort: (o) => count(o.status?.readyReplicas), width: "80px" }),
+    num2("replicas", "Replicas", (o) => count(o.spec?.replicas ?? 1)),
     AGE,
     col("conditions", "Conditions", (o) => trueConditions(o).join(", "), { width: "minmax(120px, 1.4fr)" }),
     status(workloadStatus("Deployment"))
@@ -7851,21 +7948,21 @@ var VIEWS = {
     railColumn: "pods",
     details: (o) => kv(["Replicas", `${count(o.status?.readyReplicas)} ready of ${count(o.spec?.replicas ?? 1)} desired, ${count(o.status?.updatedReplicas)} updated, ${count(o.status?.availableReplicas)} available`], ["Strategy", o.spec?.strategy?.type], ["Selector", pairs(o.spec?.selector?.matchLabels)], ["Paused", o.spec?.paused ? "Yes" : ""])
   }),
-  DaemonSet: view("DaemonSets", [NAME, NAMESPACE, num("pods", "Pods", (o) => ratio(o.status?.numberReady, o.status?.desiredNumberScheduled), { width: "80px" }), col("selector", "Node selector", (o) => pairs(o.spec?.template?.spec?.nodeSelector), { width: "minmax(120px, 1.4fr)" }), AGE, status(workloadStatus("DaemonSet"))], {
+  DaemonSet: view("DaemonSets", [NAME, NAMESPACE, num2("pods", "Pods", (o) => ratio(o.status?.numberReady, o.status?.desiredNumberScheduled), { width: "80px" }), col("selector", "Node selector", (o) => pairs(o.spec?.template?.spec?.nodeSelector), { width: "minmax(120px, 1.4fr)" }), AGE, status(workloadStatus("DaemonSet"))], {
     status: workloadStatus("DaemonSet"),
     railColumn: "pods",
     details: (o) => kv(["Scheduled", `${count(o.status?.currentNumberScheduled)} of ${count(o.status?.desiredNumberScheduled)}`], ["Ready", count(o.status?.numberReady)], ["Selector", pairs(o.spec?.selector?.matchLabels)], ["Update strategy", o.spec?.updateStrategy?.type])
   }),
-  StatefulSet: view("StatefulSets", [NAME, NAMESPACE, num("pods", "Pods", (o) => ratio(o.status?.readyReplicas, o.spec?.replicas ?? 1), { width: "80px" }), AGE, status(workloadStatus("StatefulSet"))], {
+  StatefulSet: view("StatefulSets", [NAME, NAMESPACE, num2("pods", "Pods", (o) => ratio(o.status?.readyReplicas, o.spec?.replicas ?? 1), { width: "80px" }), AGE, status(workloadStatus("StatefulSet"))], {
     status: workloadStatus("StatefulSet"),
     railColumn: "pods",
     details: (o) => kv(["Replicas", `${count(o.status?.readyReplicas)} ready of ${count(o.spec?.replicas ?? 1)}`], ["Service", o.spec?.serviceName], ["Selector", pairs(o.spec?.selector?.matchLabels)], ["Update strategy", o.spec?.updateStrategy?.type])
   }),
-  ReplicaSet: view("ReplicaSets", [NAME, NAMESPACE, num("desired", "Desired", (o) => count(o.spec?.replicas ?? 1)), num("current", "Current", (o) => count(o.status?.replicas)), num("ready", "Ready", (o) => count(o.status?.readyReplicas)), col("controlledBy", "Controlled by", (o) => owner(o) ? `${text(owner(o).kind)}/${text(owner(o).name)}` : "", { width: "minmax(140px, 1.5fr)" }), AGE], { railColumn: "ready" }),
+  ReplicaSet: view("ReplicaSets", [NAME, NAMESPACE, num2("desired", "Desired", (o) => count(o.spec?.replicas ?? 1)), num2("current", "Current", (o) => count(o.status?.replicas)), num2("ready", "Ready", (o) => count(o.status?.readyReplicas)), col("controlledBy", "Controlled by", (o) => owner(o) ? `${text(owner(o).kind)}/${text(owner(o).name)}` : "", { width: "minmax(140px, 1.5fr)" }), AGE], { railColumn: "ready" }),
   Job: view("Jobs", [
     NAME,
     NAMESPACE,
-    num("completions", "Completions", (o) => `${count(o.status?.succeeded)}/${count(o.spec?.completions ?? 1)}`, { width: "100px" }),
+    num2("completions", "Completions", (o) => `${count(o.status?.succeeded)}/${count(o.spec?.completions ?? 1)}`, { width: "100px" }),
     col("conditions", "Conditions", (o) => trueConditions(o).join(", "), { width: "minmax(100px, 1fr)" }),
     AGE,
     status(jobStatus)
@@ -7879,25 +7976,25 @@ var VIEWS = {
     NAMESPACE,
     col("schedule", "Schedule", (o) => text(o.spec?.schedule), { cell: "mono", width: "minmax(110px, 1fr)" }),
     col("suspend", "Suspend", (o) => o.spec?.suspend ? "Yes" : "No", { width: "80px" }),
-    num("active", "Active", (o) => arr(o.status?.active).length),
-    col("lastSchedule", "Last schedule", (o) => timeOf(o.status?.lastScheduleTime), { cell: "age", width: "110px", align: "end" }),
+    num2("active", "Active", (o) => arr(o.status?.active).length),
+    col("lastSchedule", "Last schedule", (o) => timeOf2(o.status?.lastScheduleTime), { cell: "age", width: "110px", align: "end" }),
     AGE
   ], {
     railColumn: "schedule",
     status: (o) => o.spec?.suspend ? st("Suspended", "muted") : st("Scheduled", "success"),
     details: (o) => kv(["Schedule", o.spec?.schedule], ["Suspended", o.spec?.suspend ? "Yes" : "No"], ["Concurrency", o.spec?.concurrencyPolicy], ["Last schedule", o.status?.lastScheduleTime], ["Last success", o.status?.lastSuccessfulTime])
   }),
-  ConfigMap: view("ConfigMaps", [NAME, NAMESPACE, num("keys", "Keys", (o) => keysOf(o.data).length + keysOf(o.binaryData).length), AGE], { railColumn: "keys", details: (o) => kv(["Keys", [...keysOf(o.data), ...keysOf(o.binaryData)].join(", ")]) }),
-  Secret: view("Secrets", [NAME, NAMESPACE, col("labels", "Labels", (o) => pairs(o.metadata?.labels), { width: "minmax(120px, 1.5fr)" }), num("keys", "Keys", (o) => keysOf(o.data).length + keysOf(o.stringData).length), col("type", "Type", (o) => text(o.type), { width: "minmax(160px, 1.5fr)" }), AGE], { railColumn: "type", details: (o) => kv(["Type", o.type], ["Keys", [...keysOf(o.data), ...keysOf(o.stringData)].join(", ")]) }),
-  ResourceQuota: view("ResourceQuotas", [NAME, NAMESPACE, num("resources", "Resources", (o) => keysOf(o.spec?.hard).length), AGE], { details: (o) => kv(...keysOf(o.spec?.hard).map((key) => [key, `${text(o.status?.used?.[key] ?? "0")} used of ${text(o.spec.hard[key])}`])) }),
-  LimitRange: view("LimitRanges", [NAME, NAMESPACE, num("limits", "Limits", (o) => arr(o.spec?.limits).length), AGE]),
+  ConfigMap: view("ConfigMaps", [NAME, NAMESPACE, num2("keys", "Keys", (o) => keysOf(o.data).length + keysOf(o.binaryData).length), AGE], { railColumn: "keys", details: (o) => kv(["Keys", [...keysOf(o.data), ...keysOf(o.binaryData)].join(", ")]) }),
+  Secret: view("Secrets", [NAME, NAMESPACE, col("labels", "Labels", (o) => pairs(o.metadata?.labels), { width: "minmax(120px, 1.5fr)" }), num2("keys", "Keys", (o) => keysOf(o.data).length + keysOf(o.stringData).length), col("type", "Type", (o) => text(o.type), { width: "minmax(160px, 1.5fr)" }), AGE], { railColumn: "type", details: (o) => kv(["Type", o.type], ["Keys", [...keysOf(o.data), ...keysOf(o.stringData)].join(", ")]) }),
+  ResourceQuota: view("ResourceQuotas", [NAME, NAMESPACE, num2("resources", "Resources", (o) => keysOf(o.spec?.hard).length), AGE], { details: (o) => kv(...keysOf(o.spec?.hard).map((key) => [key, `${text(o.status?.used?.[key] ?? "0")} used of ${text(o.spec.hard[key])}`])) }),
+  LimitRange: view("LimitRanges", [NAME, NAMESPACE, num2("limits", "Limits", (o) => arr(o.spec?.limits).length), AGE]),
   HorizontalPodAutoscaler: view("HorizontalPodAutoscalers", [
     NAME,
     NAMESPACE,
     col("metrics", "Metrics", (o) => hpaMetrics(o), { width: "minmax(140px, 1.6fr)" }),
-    num("min", "Min", (o) => count(o.spec?.minReplicas ?? 1)),
-    num("max", "Max", (o) => count(o.spec?.maxReplicas)),
-    num("replicas", "Replicas", (o) => count(o.status?.currentReplicas)),
+    num2("min", "Min", (o) => count(o.spec?.minReplicas ?? 1)),
+    num2("max", "Max", (o) => count(o.spec?.maxReplicas)),
+    num2("replicas", "Replicas", (o) => count(o.status?.currentReplicas)),
     AGE,
     status((o) => condition(o, "ScalingActive")?.status === "False" || condition(o, "AbleToScale")?.status === "False" ? st("Not scaling", "warning") : st("Active", "success"))
   ], {
@@ -7905,12 +8002,12 @@ var VIEWS = {
     status: (o) => condition(o, "ScalingActive")?.status === "False" || condition(o, "AbleToScale")?.status === "False" ? st("Not scaling", "warning") : st("Active", "success"),
     details: (o) => kv(["Target", o.spec?.scaleTargetRef ? `${text(o.spec.scaleTargetRef.kind)}/${text(o.spec.scaleTargetRef.name)}` : ""], ["Metrics", hpaMetrics(o)], ["Replicas", `${count(o.status?.currentReplicas)} current, ${count(o.status?.desiredReplicas)} desired (min ${count(o.spec?.minReplicas ?? 1)}, max ${count(o.spec?.maxReplicas)})`])
   }),
-  PodDisruptionBudget: view("PodDisruptionBudgets", [NAME, NAMESPACE, col("minAvailable", "Min available", (o) => text(o.spec?.minAvailable), { width: "110px" }), col("maxUnavailable", "Max unavailable", (o) => text(o.spec?.maxUnavailable), { width: "120px" }), num("allowed", "Allowed", (o) => count(o.status?.disruptionsAllowed)), num("healthy", "Healthy", (o) => ratio(o.status?.currentHealthy, o.status?.desiredHealthy)), AGE], { railColumn: "allowed" }),
-  PriorityClass: view("PriorityClasses", [NAME, num("value", "Value", (o) => count(o.value), { width: "110px" }), col("default", "Global default", (o) => o.globalDefault ? "Yes" : "No", { width: "110px" }), AGE], { railColumn: "value" }),
+  PodDisruptionBudget: view("PodDisruptionBudgets", [NAME, NAMESPACE, col("minAvailable", "Min available", (o) => text(o.spec?.minAvailable), { width: "110px" }), col("maxUnavailable", "Max unavailable", (o) => text(o.spec?.maxUnavailable), { width: "120px" }), num2("allowed", "Allowed", (o) => count(o.status?.disruptionsAllowed)), num2("healthy", "Healthy", (o) => ratio(o.status?.currentHealthy, o.status?.desiredHealthy)), AGE], { railColumn: "allowed" }),
+  PriorityClass: view("PriorityClasses", [NAME, num2("value", "Value", (o) => count(o.value), { width: "110px" }), col("default", "Global default", (o) => o.globalDefault ? "Yes" : "No", { width: "110px" }), AGE], { railColumn: "value" }),
   RuntimeClass: view("RuntimeClasses", [NAME, col("handler", "Handler", (o) => text(o.handler), { width: "minmax(100px, 1fr)" }), AGE], { railColumn: "handler" }),
-  Lease: view("Leases", [NAME, NAMESPACE, col("holder", "Holder", (o) => text(o.spec?.holderIdentity), { width: "minmax(160px, 2fr)" }), col("renewed", "Renewed", (o) => timeOf(o.spec?.renewTime), { cell: "age", width: "90px", align: "end" }), AGE], { railColumn: "renewed", details: (o) => kv(["Holder", o.spec?.holderIdentity], ["Duration", o.spec?.leaseDurationSeconds ? `${text(o.spec.leaseDurationSeconds)}s` : ""], ["Renewed", o.spec?.renewTime], ["Transitions", o.spec?.leaseTransitions]) }),
-  MutatingWebhookConfiguration: view("MutatingWebhookConfigurations", [NAME, num("webhooks", "Webhooks", (o) => arr(o.webhooks).length), AGE], { railColumn: "webhooks" }),
-  ValidatingWebhookConfiguration: view("ValidatingWebhookConfigurations", [NAME, num("webhooks", "Webhooks", (o) => arr(o.webhooks).length), AGE], { railColumn: "webhooks" }),
+  Lease: view("Leases", [NAME, NAMESPACE, col("holder", "Holder", (o) => text(o.spec?.holderIdentity), { width: "minmax(160px, 2fr)" }), col("renewed", "Renewed", (o) => timeOf2(o.spec?.renewTime), { cell: "age", width: "90px", align: "end" }), AGE], { railColumn: "renewed", details: (o) => kv(["Holder", o.spec?.holderIdentity], ["Duration", o.spec?.leaseDurationSeconds ? `${text(o.spec.leaseDurationSeconds)}s` : ""], ["Renewed", o.spec?.renewTime], ["Transitions", o.spec?.leaseTransitions]) }),
+  MutatingWebhookConfiguration: view("MutatingWebhookConfigurations", [NAME, num2("webhooks", "Webhooks", (o) => arr(o.webhooks).length), AGE], { railColumn: "webhooks" }),
+  ValidatingWebhookConfiguration: view("ValidatingWebhookConfigurations", [NAME, num2("webhooks", "Webhooks", (o) => arr(o.webhooks).length), AGE], { railColumn: "webhooks" }),
   Service: view("Services", [
     NAME,
     NAMESPACE,
@@ -7927,16 +8024,16 @@ var VIEWS = {
     details: (o) => kv(["Type", o.spec?.type], ["Cluster IP", o.spec?.clusterIP], ["External", externalIp(o)], ["Ports", servicePorts(o)], ["Selector", pairs(o.spec?.selector)], ["Session affinity", o.spec?.sessionAffinity])
   }),
   Endpoints: view("Endpoints", [NAME, NAMESPACE, col("endpoints", "Endpoints", (o) => endpointsText(o), { width: "minmax(200px, 3fr)" }), AGE], { railColumn: "endpoints", status: (o) => endpointsText(o) ? st("Ready", "success") : st("No addresses", "warning") }),
-  EndpointSlice: view("EndpointSlices", [NAME, NAMESPACE, col("addressType", "Address type", (o) => text(o.addressType), { width: "110px" }), col("ports", "Ports", (o) => arr(o.ports).map((p) => text(p.port)).join(", "), { width: "110px" }), num("endpoints", "Endpoints", (o) => arr(o.endpoints).length), AGE], { railColumn: "endpoints" }),
+  EndpointSlice: view("EndpointSlices", [NAME, NAMESPACE, col("addressType", "Address type", (o) => text(o.addressType), { width: "110px" }), col("ports", "Ports", (o) => arr(o.ports).map((p) => text(p.port)).join(", "), { width: "110px" }), num2("endpoints", "Endpoints", (o) => arr(o.endpoints).length), AGE], { railColumn: "endpoints" }),
   Ingress: view("Ingresses", [NAME, NAMESPACE, col("loadBalancers", "Load balancers", (o) => more(loadBalancers(o), 2), { width: "minmax(160px, 2fr)" }), col("rules", "Rules", (o) => more(arr(o.spec?.rules).map((r) => text(r.host) || "*"), 2), { width: "minmax(140px, 1.6fr)" }), AGE], { railColumn: "rules", details: (o) => kv(["Class", o.spec?.ingressClassName], ["Hosts", arr(o.spec?.rules).map((r) => text(r.host) || "*").join(", ")], ["Address", loadBalancers(o).join(", ")]) }),
   IngressClass: view("IngressClasses", [NAME, col("controller", "Controller", (o) => text(o.spec?.controller), { width: "minmax(180px, 2fr)" }), AGE], { railColumn: "controller" }),
   NetworkPolicy: view("NetworkPolicies", [NAME, NAMESPACE, col("types", "Policy types", (o) => Array.isArray(o.spec?.policyTypes) ? o.spec.policyTypes.join(", ") : "", { width: "minmax(120px, 1fr)" }), col("selector", "Pod selector", (o) => pairs(o.spec?.podSelector?.matchLabels), { width: "minmax(140px, 1.6fr)" }), AGE], { railColumn: "types" }),
-  PersistentVolumeClaim: view("PersistentVolumeClaims", [NAME, NAMESPACE, col("storageClass", "Storage class", (o) => text(o.spec?.storageClassName), { width: "minmax(110px, 1fr)" }), num("size", "Size", (o) => pvcSize(o), { sort: (o) => quantityValue(pvcSize(o)), width: "90px" }), col("volume", "Volume", (o) => text(o.spec?.volumeName), { width: "minmax(140px, 1.5fr)" }), AGE, status((o) => pvStatus(text(o.status?.phase)))], {
+  PersistentVolumeClaim: view("PersistentVolumeClaims", [NAME, NAMESPACE, col("storageClass", "Storage class", (o) => text(o.spec?.storageClassName), { width: "minmax(110px, 1fr)" }), num2("size", "Size", (o) => pvcSize(o), { sort: (o) => quantityValue(pvcSize(o)), width: "90px" }), col("volume", "Volume", (o) => text(o.spec?.volumeName), { width: "minmax(140px, 1.5fr)" }), AGE, status((o) => pvStatus(text(o.status?.phase)))], {
     railColumn: "size",
     status: (o) => pvStatus(text(o.status?.phase)),
     details: (o) => kv(["Storage class", o.spec?.storageClassName], ["Size", pvcSize(o)], ["Access modes", Array.isArray(o.spec?.accessModes) ? o.spec.accessModes.join(", ") : ""], ["Volume", o.spec?.volumeName], ["Volume mode", o.spec?.volumeMode])
   }),
-  PersistentVolume: view("PersistentVolumes", [NAME, col("storageClass", "Storage class", (o) => text(o.spec?.storageClassName), { width: "minmax(110px, 1fr)" }), num("capacity", "Capacity", (o) => text(o.spec?.capacity?.storage), { sort: (o) => quantityValue(o.spec?.capacity?.storage), width: "90px" }), col("claim", "Claim", (o) => o.spec?.claimRef ? `${text(o.spec.claimRef.namespace)}/${text(o.spec.claimRef.name)}` : "", { width: "minmax(160px, 2fr)" }), col("reclaim", "Reclaim", (o) => text(o.spec?.persistentVolumeReclaimPolicy), { width: "90px" }), AGE, status((o) => pvStatus(text(o.status?.phase)))], { railColumn: "capacity", status: (o) => pvStatus(text(o.status?.phase)), details: (o) => kv(["Capacity", o.spec?.capacity?.storage], ["Reclaim policy", o.spec?.persistentVolumeReclaimPolicy], ["Claim", o.spec?.claimRef ? `${text(o.spec.claimRef.namespace)}/${text(o.spec.claimRef.name)}` : ""], ["Storage class", o.spec?.storageClassName]) }),
+  PersistentVolume: view("PersistentVolumes", [NAME, col("storageClass", "Storage class", (o) => text(o.spec?.storageClassName), { width: "minmax(110px, 1fr)" }), num2("capacity", "Capacity", (o) => text(o.spec?.capacity?.storage), { sort: (o) => quantityValue(o.spec?.capacity?.storage), width: "90px" }), col("claim", "Claim", (o) => o.spec?.claimRef ? `${text(o.spec.claimRef.namespace)}/${text(o.spec.claimRef.name)}` : "", { width: "minmax(160px, 2fr)" }), col("reclaim", "Reclaim", (o) => text(o.spec?.persistentVolumeReclaimPolicy), { width: "90px" }), AGE, status((o) => pvStatus(text(o.status?.phase)))], { railColumn: "capacity", status: (o) => pvStatus(text(o.status?.phase)), details: (o) => kv(["Capacity", o.spec?.capacity?.storage], ["Reclaim policy", o.spec?.persistentVolumeReclaimPolicy], ["Claim", o.spec?.claimRef ? `${text(o.spec.claimRef.namespace)}/${text(o.spec.claimRef.name)}` : ""], ["Storage class", o.spec?.storageClassName]) }),
   StorageClass: view("StorageClasses", [NAME, col("provisioner", "Provisioner", (o) => text(o.provisioner), { width: "minmax(160px, 2fr)" }), col("reclaim", "Reclaim", (o) => text(o.reclaimPolicy), { width: "90px" }), col("default", "Default", (o) => isDefaultClass(o) ? "Yes" : "", { width: "80px" }), AGE], { railColumn: "provisioner" }),
   Namespace: view("Namespaces", [NAME, col("labels", "Labels", (o) => pairs(o.metadata?.labels), { width: "minmax(160px, 3fr)" }), AGE, status((o) => text(o.status?.phase) === "Terminating" ? st("Terminating", "warning") : st(text(o.status?.phase) || "Active", "success"))], { railColumn: "age", status: (o) => text(o.status?.phase) === "Terminating" ? st("Terminating", "warning") : st(text(o.status?.phase) || "Active", "success") }),
   Event: view("Events", [
@@ -7945,7 +8042,7 @@ var VIEWS = {
     NAMESPACE,
     col("object", "Involved object", (o) => involved(o), { width: "minmax(160px, 2fr)" }),
     col("source", "Source", (o) => text(o.source?.component ?? o.reportingComponent), { width: "minmax(100px, 1fr)" }),
-    num("count", "Count", (o) => count(o.count ?? o.series?.count ?? 1)),
+    num2("count", "Count", (o) => count(o.count ?? o.series?.count ?? 1)),
     AGE,
     col("lastSeen", "Last seen", (o) => eventTime(o), { cell: "age", width: "80px", align: "end" })
   ], {
@@ -7955,9 +8052,9 @@ var VIEWS = {
     status: (o) => text(o.type) === "Warning" ? st("Warning", "warning") : st(text(o.type) || "Normal", "info"),
     details: (o) => kv(["Reason", o.reason], ["Message", o.message ?? o.note], ["Object", involved(o)], ["Count", o.count ?? o.series?.count], ["Source", o.source?.component ?? o.reportingComponent])
   }),
-  ServiceAccount: view("ServiceAccounts", [NAME, NAMESPACE, num("secrets", "Secrets", (o) => arr(o.secrets).length), AGE], { railColumn: "secrets" }),
-  ClusterRole: view("ClusterRoles", [NAME, num("rules", "Rules", (o) => arr(o.rules).length), AGE], { railColumn: "rules" }),
-  Role: view("Roles", [NAME, NAMESPACE, num("rules", "Rules", (o) => arr(o.rules).length), AGE], { railColumn: "rules" }),
+  ServiceAccount: view("ServiceAccounts", [NAME, NAMESPACE, num2("secrets", "Secrets", (o) => arr(o.secrets).length), AGE], { railColumn: "secrets" }),
+  ClusterRole: view("ClusterRoles", [NAME, num2("rules", "Rules", (o) => arr(o.rules).length), AGE], { railColumn: "rules" }),
+  Role: view("Roles", [NAME, NAMESPACE, num2("rules", "Rules", (o) => arr(o.rules).length), AGE], { railColumn: "rules" }),
   ClusterRoleBinding: view("ClusterRoleBindings", [NAME, col("subjects", "Subjects", (o) => subjects(o), { width: "minmax(180px, 2fr)" }), col("role", "Role", (o) => o.roleRef ? `${text(o.roleRef.kind)}/${text(o.roleRef.name)}` : "", { width: "minmax(160px, 2fr)" }), AGE], { railColumn: "role", details: (o) => kv(["Role", o.roleRef ? `${text(o.roleRef.kind)}/${text(o.roleRef.name)}` : ""], ["Subjects", arr(o.subjects).map((s) => `${text(s.kind)}:${text(s.namespace ? `${text(s.namespace)}/` : "")}${text(s.name)}`).join(", ")]) }),
   RoleBinding: view("RoleBindings", [NAME, NAMESPACE, col("subjects", "Subjects", (o) => subjects(o), { width: "minmax(180px, 2fr)" }), col("role", "Role", (o) => o.roleRef ? `${text(o.roleRef.kind)}/${text(o.roleRef.name)}` : "", { width: "minmax(160px, 2fr)" }), AGE], { railColumn: "role", details: (o) => kv(["Role", o.roleRef ? `${text(o.roleRef.kind)}/${text(o.roleRef.name)}` : ""], ["Subjects", arr(o.subjects).map((s) => `${text(s.kind)}:${text(s.name)}`).join(", ")]) }),
   CustomResourceDefinition: view("Definitions", [NAME, col("group", "Group", (o) => text(o.spec?.group), { width: "minmax(140px, 1.6fr)" }), col("kind", "Kind", (o) => text(o.spec?.names?.kind), { width: "minmax(110px, 1fr)" }), col("scope", "Scope", (o) => text(o.spec?.scope), { width: "90px" }), col("versions", "Versions", (o) => arr(o.spec?.versions).map((v) => text(v.name)).join(", "), { width: "90px" }), AGE], { railColumn: "kind", details: (o) => kv(["Group", o.spec?.group], ["Kind", o.spec?.names?.kind], ["Scope", o.spec?.scope], ["Versions", arr(o.spec?.versions).map((v) => text(v.name)).join(", ")]) })
@@ -7973,9 +8070,18 @@ function pvStatus(phase) {
 }
 var VIEW_KINDS = Object.keys(VIEWS);
 var item = (kind) => ({ kind, title: VIEWS[kind]?.title ?? `${kind}s` });
+var CLUSTER_OVERVIEW = "ClusterOverview";
+var WORKLOADS_OVERVIEW = "WorkloadsOverview";
+var OVERVIEW_KINDS = new Set([CLUSTER_OVERVIEW, WORKLOADS_OVERVIEW]);
+var SPECIAL_KINDS = new Set([CLUSTER_OVERVIEW, WORKLOADS_OVERVIEW, "PortForwards"]);
 var NAV = [
+  { id: "cluster", title: "Cluster", heading: true, items: [{ kind: CLUSTER_OVERVIEW, title: "Overview" }] },
   { id: "nodes", title: "Nodes", items: [item("Node")] },
-  { id: "workloads", title: "Workloads", items: ["Pod", "Deployment", "DaemonSet", "StatefulSet", "ReplicaSet", "Job", "CronJob"].map(item) },
+  {
+    id: "workloads",
+    title: "Workloads",
+    items: [{ kind: WORKLOADS_OVERVIEW, title: "Overview" }, ...["Pod", "Deployment", "DaemonSet", "StatefulSet", "ReplicaSet", "Job", "CronJob"].map(item)]
+  },
   {
     id: "config",
     title: "Config",
@@ -8277,7 +8383,7 @@ var queueEvent = (w, event) => {
     w.flushTimer = setTimeout(() => flush(w), BATCH_MS);
 };
 var list = async (w) => {
-  const answer = await callJson(w.target, { path: kindPath(w.info, w.namespace), timeoutMs: 60000 });
+  const answer = await callJson(w.target, { path: kindPath(w.info, w.namespace), query: { fieldSelector: w.fieldSelector ?? undefined }, timeoutMs: 60000 });
   w.store = new Map;
   for (const item of answer.items ?? []) {
     const object = prepare(w, item);
@@ -8341,7 +8447,7 @@ var connect = async (w) => {
   if (w.closed)
     return;
   try {
-    w.stream = await openStream(w.target, kindPath(w.info, w.namespace), { watch: "true", resourceVersion: w.rv, allowWatchBookmarks: "true", timeoutSeconds: "600" }, (line) => onLine(w, line), (error) => {
+    w.stream = await openStream(w.target, kindPath(w.info, w.namespace), { watch: "true", resourceVersion: w.rv, allowWatchBookmarks: "true", timeoutSeconds: "600", fieldSelector: w.fieldSelector ?? undefined }, (line) => onLine(w, line), (error) => {
       w.stream = null;
       if (w.closed)
         return;
@@ -8407,8 +8513,8 @@ var ensureSweeper = () => {
   }, SWEEP_MS);
   sweeper2.unref();
 };
-var openWatch = async (target, info, namespace) => {
-  const key = `${targetKey(target)}|${namespace ?? ""}|${info.group}/${info.plural}`;
+var openWatch = async (target, info, namespace, fieldSelector = null) => {
+  const key = `${targetKey(target)}|${namespace ?? ""}|${info.group}/${info.plural}|${fieldSelector ?? ""}`;
   let w = watches.get(key);
   if (!w || w.closed) {
     const id = `w_${createHash2("sha1").update(key).digest("hex").slice(0, 12)}`;
@@ -8418,6 +8524,7 @@ var openWatch = async (target, info, namespace) => {
       target,
       info,
       namespace: info.namespaced ? namespace : null,
+      fieldSelector,
       store: new Map,
       rv: "",
       leaseAt: Date.now(),
@@ -8677,6 +8784,181 @@ var restoreForwards = async () => {
   }
   for (const forward of forwards.values())
     start(forward);
+};
+
+// src/shared/prom.ts
+var NOT_A_SERVER = /alertmanager|exporter|kube-state-metrics|pushgateway|operator|adapter|blackbox|grafana|thanos|promtail/i;
+var SERVER_LABELS = new Set(["prometheus", "kube-prometheus-stack-prometheus"]);
+var WEB_PORTS = new Set(["web", "http", "http-web", "web-http", "prometheus", "http-prometheus"]);
+var HOME_NAMESPACES = new Set(["monitoring", "prometheus", "observability", "kube-prometheus-stack", "kube-system"]);
+var nameLooksLikeServer = (name) => name === "prometheus" || name === "prometheus-operated" || name.startsWith("prometheus-") || /-prometheus$/.test(name);
+var pickPort = (service) => {
+  const ports = (service.spec?.ports ?? []).filter((port) => !port.protocol || port.protocol === "TCP");
+  const chosen = ports.find((port) => WEB_PORTS.has(String(port.name ?? ""))) ?? ports.find((port) => port.port === 9090) ?? ports.find((port) => port.port === 80) ?? ports[0];
+  return chosen && chosen.port !== undefined ? String(chosen.port) : null;
+};
+var promCandidates = (services) => {
+  const scored = [];
+  for (const service of services) {
+    const name = String(service.metadata?.name ?? "");
+    const namespace = String(service.metadata?.namespace ?? "");
+    if (!name || !namespace || NOT_A_SERVER.test(name))
+      continue;
+    const label = String(service.metadata?.labels?.["app.kubernetes.io/name"] ?? "");
+    const labelled = SERVER_LABELS.has(label);
+    if (!labelled && !nameLooksLikeServer(name))
+      continue;
+    if (label && !labelled)
+      continue;
+    const port = pickPort(service);
+    if (!port)
+      continue;
+    let score = labelled ? 4 : 0;
+    if (name === "prometheus-server" || name === "kube-prometheus-stack-prometheus" || name === "prometheus-operated" || name === "prometheus")
+      score += 3;
+    if (service.metadata?.labels?.["app.kubernetes.io/component"] === "server")
+      score += 1;
+    if (HOME_NAMESPACES.has(namespace))
+      score += 1;
+    if (service.spec?.clusterIP === "None")
+      score -= 1;
+    scored.push({ score, service: { namespace, name, port } });
+  }
+  return scored.sort((a, b) => b.score - a.score || `${a.service.namespace}/${a.service.name}`.localeCompare(`${b.service.namespace}/${b.service.name}`)).map((entry) => entry.service);
+};
+var DNS = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
+var PORT = /^([0-9]{1,5}|[a-z0-9]([-a-z0-9]*[a-z0-9])?)$/;
+var parsePromService = (input) => {
+  const namespace = String(input.namespace ?? "").trim();
+  const name = String(input.service ?? "").trim();
+  const port = String(input.port ?? "").trim();
+  if (!namespace || !DNS.test(namespace) || namespace.length > 63)
+    return "Enter the namespace of the Prometheus service.";
+  if (!name || !DNS.test(name) || name.length > 253)
+    return "Enter the name of the Prometheus service.";
+  if (!PORT.test(port))
+    return "Enter a port number or a port name.";
+  return { namespace, name, port };
+};
+var proxyBase = (service) => `/api/v1/namespaces/${encodeURIComponent(service.namespace)}/services/${encodeURIComponent(service.name)}:${encodeURIComponent(service.port)}/proxy`;
+var SERIES_SHOWN = 4;
+var RATE = "5m";
+var promString = (value) => value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\n/g, "\\n");
+var escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+var workloadPodPattern = (kind, name) => {
+  const base = escapeRegex(name);
+  switch (kind) {
+    case "Deployment":
+      return `${base}-[^-]+-[^-]+`;
+    case "StatefulSet":
+      return `${base}-[0-9]+`;
+    case "DaemonSet":
+    case "ReplicaSet":
+    case "Job":
+      return `${base}-[^-]+`;
+    case "CronJob":
+      return `${base}-[0-9]+-[^-]+`;
+    default:
+      return null;
+  }
+};
+var WORKLOAD_KINDS = new Set(["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job"]);
+var NAME2 = /^[A-Za-z0-9._:-]{1,253}$/;
+var nodeInstancePattern = (name, addresses) => {
+  const names = [name, ...addresses].filter(Boolean).map(escapeRegex);
+  return `(${names.join("|")})(:[0-9]+)?`;
+};
+var podSelector = (namespace, pod, regex) => `namespace="${promString(namespace)}",pod${regex ? "=~" : "="}"${promString(pod)}",container!="",container!="POD"`;
+var chartSpecs = (target) => {
+  if (!NAME2.test(target.name))
+    throw new Error("Not a valid name.");
+  if ("namespace" in target && !NAME2.test(target.namespace))
+    throw new Error("Not a valid namespace.");
+  if (target.scope === "pod" || target.scope === "workload") {
+    const regex = target.scope === "workload";
+    let pod = target.name;
+    if (target.scope === "workload") {
+      const pattern = workloadPodPattern(target.kind, target.name);
+      if (!pattern)
+        throw new Error(`No charts for ${target.kind}.`);
+      pod = pattern;
+    }
+    const selector = podSelector(target.namespace, pod, regex);
+    const net = `namespace="${promString(target.namespace)}",pod${regex ? "=~" : "="}"${promString(pod)}"`;
+    const by = regex ? "" : " by (container)";
+    const series = (metric) => ({ name: regex ? "Total" : "Container", by: regex ? undefined : "container", query: `sum${by} (${metric})` });
+    return [
+      { id: "cpu", title: "CPU", unit: "cores", queries: [series(`rate(container_cpu_usage_seconds_total{${selector}}[${RATE}])`)] },
+      { id: "memory", title: "Memory", unit: "bytes", queries: [series(`container_memory_working_set_bytes{${selector}}`)] },
+      {
+        id: "network",
+        title: "Network",
+        unit: "bytesPerSecond",
+        queries: [
+          { name: "Received", query: `sum(rate(container_network_receive_bytes_total{${net}}[${RATE}]))` },
+          { name: "Sent", query: `sum(rate(container_network_transmit_bytes_total{${net}}[${RATE}]))` }
+        ]
+      },
+      {
+        id: "filesystem",
+        title: "Filesystem",
+        unit: "bytes",
+        queries: [series(`container_fs_usage_bytes{${selector}}`)],
+        fallback: { note: "This cluster does not report disk use per container. Showing the size of the log files instead.", queries: [series(`kubelet_container_log_filesystem_used_bytes{${selector}}`)] }
+      }
+    ];
+  }
+  const instance = promString(nodeInstancePattern(target.name, target.addresses.filter((address) => NAME2.test(address))));
+  const pick = `instance=~"${instance}"`;
+  const device = 'device!~"lo|veth.*|docker.*|cali.*|flannel.*|cni.*|eni.*|cbr.*"';
+  const disk = `${pick},mountpoint="/",fstype!~"tmpfs|rootfs"`;
+  return [
+    { id: "cpu", title: "CPU", unit: "percent", queries: [{ name: "Used", query: `100 * (1 - avg(rate(node_cpu_seconds_total{mode="idle",${pick}}[${RATE}])))` }] },
+    { id: "memory", title: "Memory", unit: "bytes", queries: [{ name: "Used", query: `sum(node_memory_MemTotal_bytes{${pick}}) - sum(node_memory_MemAvailable_bytes{${pick}})` }] },
+    {
+      id: "network",
+      title: "Network",
+      unit: "bytesPerSecond",
+      queries: [
+        { name: "Received", query: `sum(rate(node_network_receive_bytes_total{${pick},${device}}[${RATE}]))` },
+        { name: "Sent", query: `sum(rate(node_network_transmit_bytes_total{${pick},${device}}[${RATE}]))` }
+      ]
+    },
+    { id: "filesystem", title: "Filesystem", unit: "bytes", queries: [{ name: "Used", query: `sum(node_filesystem_size_bytes{${disk}}) - sum(node_filesystem_avail_bytes{${disk}})` }] }
+  ];
+};
+var parseRange = (body, query) => {
+  const data = body?.data;
+  if (!data || data.resultType !== "matrix" || !Array.isArray(data.result))
+    return [];
+  const out = [];
+  for (const entry of data.result) {
+    const points = [];
+    let any = false;
+    for (const pair of Array.isArray(entry.values) ? entry.values : []) {
+      const time = Number(pair[0]);
+      const value = Number(pair[1]);
+      if (!Number.isFinite(time))
+        continue;
+      if (Number.isFinite(value)) {
+        points.push([time, value]);
+        any = true;
+      } else
+        points.push([time, null]);
+    }
+    if (!any)
+      continue;
+    const label = query.by ? String(entry.metric?.[query.by] ?? "") : "";
+    out.push({ name: label || query.name, points });
+  }
+  return out;
+};
+var peak = (series) => series.points.reduce((max, [, value]) => value !== null && value > max ? value : max, 0);
+var limitSeries = (series, limit = SERIES_SHOWN) => {
+  if (series.length <= limit)
+    return { series, hidden: 0 };
+  const kept = [...series].sort((a, b) => peak(b) - peak(a)).slice(0, limit);
+  return { series: kept, hidden: series.length - limit };
 };
 
 // src/shared/ops.ts
@@ -9437,6 +9719,369 @@ var closeAllLogs = () => {
     close(stream);
 };
 
+// src/service/metrics.ts
+var BASE = "/apis/metrics.k8s.io/v1beta1";
+var CACHE_MS2 = 1e4;
+var DISK_CACHE_MS = 30000;
+var DISK_PARALLEL = 6;
+var cache2 = new Map;
+var cached = async (key, ttl, load) => {
+  const hit = cache2.get(key);
+  if (hit && Date.now() - hit.at < ttl)
+    return hit.value;
+  const value = await load();
+  cache2.set(key, { at: Date.now(), value });
+  if (cache2.size > 200) {
+    for (const [old, entry] of cache2)
+      if (Date.now() - entry.at > ttl)
+        cache2.delete(old);
+  }
+  return value;
+};
+var statusFromError = (error) => {
+  if (!(error instanceof K8sError))
+    return null;
+  if (error.code === "NOT_FOUND")
+    return { status: "missing", message: "This cluster has no metrics-server." };
+  if (error.code === "FORBIDDEN")
+    return { status: "forbidden", message: error.message };
+  if (error.code === "K8S_ERROR" && (error.status === 503 || error.status === 502 || error.status === 504 || error.status === 500)) {
+    return { status: "unavailable", message: error.message };
+  }
+  return null;
+};
+var readNodeDisk = async (target, name) => {
+  try {
+    const summary = await callJson(target, { path: `/api/v1/nodes/${encodeURIComponent(name)}/proxy/stats/summary`, timeoutMs: 8000 });
+    return kubeletDisk(summary);
+  } catch (error) {
+    if (error instanceof K8sError && error.code === "FORBIDDEN")
+      return "forbidden";
+    if (error instanceof K8sError && (error.code === "AUTH_EXPIRED" || error.code === "NO_KUBECTL"))
+      throw error;
+    return null;
+  }
+};
+var readDisks = async (target, names) => {
+  const disks = new Map;
+  let forbidden = false;
+  let next = 0;
+  const worker = async () => {
+    while (next < names.length) {
+      const name = names[next++];
+      const found = await readNodeDisk(target, name);
+      if (found === "forbidden")
+        forbidden = true;
+      else if (found)
+        disks.set(name, found);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(DISK_PARALLEL, names.length) }, worker));
+  return { status: disks.size > 0 ? "ok" : forbidden ? "forbidden" : "unavailable", disks };
+};
+var readMetrics = async (target, want) => {
+  const key = targetKey(target);
+  const answer = { status: "ok", at: null, nodes: [], pods: [] };
+  try {
+    if (want.nodes) {
+      const nodes = await cached(`${key}|nodes`, CACHE_MS2, async () => compactNodeMetrics(await callJson(target, { path: `${BASE}/nodes`, timeoutMs: 20000 })));
+      let disks = new Map;
+      if (want.disk) {
+        const read = await cached(`${key}|disk`, DISK_CACHE_MS, () => readDisks(target, nodes.map((node) => node.name)));
+        answer.diskStatus = read.status;
+        disks = read.disks;
+      }
+      answer.nodes = nodes.map((node) => ({ name: node.name, cpu: node.cpu, memory: node.memory, diskUsed: disks.get(node.name)?.used ?? null, diskCapacity: disks.get(node.name)?.capacity ?? null }));
+      for (const node of nodes)
+        if (node.at !== null)
+          answer.at = Math.max(answer.at ?? 0, node.at);
+    }
+    if (want.pods) {
+      const path = want.namespace ? `${BASE}/namespaces/${encodeURIComponent(want.namespace)}/pods` : `${BASE}/pods`;
+      const pods = await cached(`${key}|${path}`, CACHE_MS2, async () => compactPodMetrics(await callJson(target, { path, timeoutMs: 30000 })));
+      answer.pods = pods.map((pod) => ({ namespace: pod.namespace, name: pod.name, cpu: pod.cpu, memory: pod.memory }));
+      for (const pod of pods)
+        if (pod.at !== null)
+          answer.at = Math.max(answer.at ?? 0, pod.at);
+    }
+    return answer;
+  } catch (error) {
+    const mapped = statusFromError(error);
+    if (!mapped)
+      throw error;
+    return { status: mapped.status, message: mapped.message, at: null, nodes: [], pods: [] };
+  }
+};
+
+// src/service/prometheus.ts
+import { spawn as spawn3 } from "node:child_process";
+import { createHash as createHash5 } from "node:crypto";
+import http2 from "node:http";
+import { rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { join as join6 } from "node:path";
+var PROBE_MS = 6000;
+var QUERY_MS = 20000;
+var FOUND_MS = 10 * 60000;
+var MISSING_MS = 60000;
+var IDLE_MS2 = 5 * 60000;
+var FORWARD_START_MS = 15000;
+var CHART_CACHE_MS = 15000;
+var STEP_SECONDS = 60;
+var WINDOW_SECONDS = 3600;
+var OVERRIDES = "prometheus.json";
+var detections = new Map;
+var inflight = new Map;
+var readOverrides = () => {
+  const all = readJson(OVERRIDES, {});
+  return all && typeof all === "object" && !Array.isArray(all) ? all : {};
+};
+var readOverride = (context) => {
+  const found = readOverrides()[context];
+  return found && typeof found.namespace === "string" && typeof found.name === "string" && typeof found.port === "string" ? found : null;
+};
+var writeOverride = (context, service) => {
+  const all = { ...readOverrides() };
+  if (service)
+    all[context] = service;
+  else
+    delete all[context];
+  writeJson(OVERRIDES, all);
+};
+var localGet = (port, path, query, timeoutMs) => new Promise((resolve, reject) => {
+  const qs = new URLSearchParams(query).toString();
+  const req = http2.request({ host: "127.0.0.1", port, path: qs ? `${path}?${qs}` : path, method: "GET", headers: { Accept: "application/json" }, timeout: timeoutMs }, (res) => {
+    const chunks = [];
+    res.on("data", (chunk) => chunks.push(chunk));
+    res.on("end", () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8") }));
+    res.on("error", reject);
+  });
+  req.on("timeout", () => req.destroy(new Error("Prometheus took too long to answer.")));
+  req.on("error", reject);
+  req.end();
+});
+var hidden = new Map;
+var sweeper4 = null;
+var stopHidden = (entry) => {
+  entry.exited = true;
+  hidden.delete(entry.key);
+  entry.child.kill("SIGTERM");
+  rmSync3(entry.pidFile, { force: true });
+};
+var sweep2 = () => {
+  const now = Date.now();
+  for (const entry of [...hidden.values()])
+    if (now - entry.lastUsed > IDLE_MS2)
+      stopHidden(entry);
+  if (hidden.size === 0 && sweeper4) {
+    clearInterval(sweeper4);
+    sweeper4 = null;
+  }
+};
+var portNumber = async (target, service) => {
+  if (/^[0-9]+$/.test(service.port))
+    return Number(service.port);
+  const object = await callJson(target, { path: `/api/v1/namespaces/${encodeURIComponent(service.namespace)}/services/${encodeURIComponent(service.name)}` });
+  const found = (object.spec?.ports ?? []).find((port) => port.name === service.port);
+  if (!found || typeof found.port !== "number")
+    throw new K8sError("NOT_FOUND", `${service.namespace}/${service.name} has no port named "${service.port}".`);
+  return found.port;
+};
+var ensureForward = async (target, service) => {
+  const key = `${targetKey(target)}|${service.namespace}/${service.name}:${service.port}`;
+  const existing = hidden.get(key);
+  if (existing && !existing.exited) {
+    existing.lastUsed = Date.now();
+    return existing.ready;
+  }
+  const remote = await portNumber(target, service);
+  const local = await freePort();
+  const id = createHash5("sha1").update(key).digest("hex").slice(0, 10);
+  const child = spawn3(kubectlPath(), ["--context", target.context, ...kubeconfigArgs(target.kubeconfig), "-n", service.namespace, "port-forward", `svc/${service.name}`, `${local}:${remote}`, "--address", "127.0.0.1"], {
+    env: childEnv(),
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const pidFile = join6(sockDir(), `fwd-prom-${id}.pid`);
+  if (child.pid) {
+    try {
+      writeFileSync4(pidFile, String(child.pid), { mode: 384 });
+    } catch {}
+  }
+  const entry = { key, child, ready: Promise.resolve(local), lastUsed: Date.now(), exited: false, pidFile };
+  let output = "";
+  entry.ready = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new K8sError("UNREACHABLE", "The connection to Prometheus did not open in time."));
+      stopHidden(entry);
+    }, FORWARD_START_MS);
+    const onData = (chunk) => {
+      output = (output + String(chunk)).slice(-2000);
+      if (/Forwarding from/.test(output)) {
+        clearTimeout(timer);
+        resolve(local);
+      }
+    };
+    child.stdout?.on("data", onData);
+    child.stderr?.on("data", onData);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(new K8sError("NO_KUBECTL", clip(error.message), { kind: "install" }));
+    });
+    child.on("exit", () => {
+      clearTimeout(timer);
+      entry.exited = true;
+      hidden.delete(key);
+      rmSync3(pidFile, { force: true });
+      reject(fromOutput(output, "The connection to Prometheus stopped.", target.context));
+    });
+  });
+  entry.ready.catch(() => {
+    return;
+  });
+  hidden.set(key, entry);
+  if (!sweeper4) {
+    sweeper4 = setInterval(sweep2, 60000);
+    sweeper4.unref();
+  }
+  return entry.ready;
+};
+var closePrometheusForwards = () => {
+  for (const entry of [...hidden.values()])
+    stopHidden(entry);
+  if (sweeper4)
+    clearInterval(sweeper4);
+  sweeper4 = null;
+};
+var fetchProm = async (target, found, path, query, timeoutMs) => {
+  if (found.via === "proxy")
+    return call(target, { path: `${proxyBase(found.service)}${path}`, query, timeoutMs });
+  const port = await ensureForward(target, found.service);
+  return localGet(port, path, query, timeoutMs);
+};
+var answersQueries = (reply) => {
+  if (reply.status !== 200)
+    return false;
+  try {
+    return JSON.parse(reply.text).status === "success";
+  } catch {
+    return false;
+  }
+};
+var mustRethrow = (error) => error instanceof K8sError && (error.code === "AUTH_EXPIRED" || error.code === "NO_KUBECTL");
+var detectNow = async (target) => {
+  const override = readOverride(target.context);
+  let candidates;
+  if (override)
+    candidates = [override];
+  else {
+    try {
+      const services = await callJson(target, { path: "/api/v1/services", timeoutMs: 60000 });
+      candidates = promCandidates(services.items ?? []).slice(0, 2);
+    } catch (error) {
+      if (error instanceof K8sError && error.code === "FORBIDDEN")
+        return { found: false, reason: "forbidden", tried: [], source: "detected" };
+      throw error;
+    }
+  }
+  const source = override ? "override" : "detected";
+  if (candidates.length === 0)
+    return { found: false, reason: "none", tried: [], source };
+  for (const service of candidates) {
+    for (const via of ["proxy", "forward"]) {
+      try {
+        const reply = await fetchProm(target, { found: true, service, via, source }, "/api/v1/query", { query: "vector(1)" }, PROBE_MS);
+        if (answersQueries(reply))
+          return { found: true, service, via, source };
+      } catch (error) {
+        if (mustRethrow(error))
+          throw error;
+      }
+    }
+  }
+  return { found: false, reason: "unreachable", tried: candidates, source };
+};
+var detect = async (target, force = false) => {
+  const key = targetKey(target);
+  const hit = detections.get(key);
+  if (!force && hit && Date.now() - hit.at < (hit.value.found ? FOUND_MS : MISSING_MS))
+    return hit.value;
+  const running = inflight.get(key);
+  if (running)
+    return running;
+  const job = detectNow(target).then((value) => {
+    detections.set(key, { at: Date.now(), value });
+    return value;
+  }).finally(() => inflight.delete(key));
+  inflight.set(key, job);
+  return job;
+};
+var forgetDetection = (target) => {
+  detections.delete(targetKey(target));
+};
+var chartCache = new Map;
+var promError = (reply) => {
+  try {
+    const body = JSON.parse(reply.text);
+    if (typeof body.error === "string")
+      return clip(body.error, 160);
+  } catch {}
+  return `Prometheus answered ${reply.status}.`;
+};
+var readCharts = async (target, scope) => {
+  let specs;
+  try {
+    specs = chartSpecs(scope);
+  } catch (error) {
+    throw new K8sError("BAD_REQUEST", error instanceof Error ? error.message : "Not a valid chart request.");
+  }
+  const cacheKey = `${targetKey(target)}|${JSON.stringify(scope)}`;
+  const hit = chartCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < CHART_CACHE_MS)
+    return hit.value;
+  const end = Math.floor(Date.now() / 1000 / STEP_SECONDS) * STEP_SECONDS;
+  const start = end - WINDOW_SECONDS;
+  const base = { start, end, step: STEP_SECONDS };
+  const found = await detect(target);
+  if (!found.found)
+    return { ...base, available: false, reason: found.reason, charts: [] };
+  const charts = await Promise.all(specs.map(async (spec) => {
+    try {
+      const run = async (queries) => {
+        const lists = await Promise.all(queries.map(async (query) => {
+          const reply = await fetchProm(target, found, "/api/v1/query_range", { query: query.query, start: String(start), end: String(end), step: `${STEP_SECONDS}s` }, QUERY_MS);
+          if (reply.status !== 200)
+            throw new K8sError("K8S_ERROR", promError(reply));
+          return parseRange(JSON.parse(reply.text), query);
+        }));
+        return lists.flat();
+      };
+      let all = await run(spec.queries);
+      let note;
+      if (all.length === 0 && spec.fallback) {
+        all = await run(spec.fallback.queries);
+        if (all.length > 0)
+          note = spec.fallback.note;
+      }
+      const limited = limitSeries(all);
+      return { id: spec.id, title: spec.title, unit: spec.unit, series: limited.series, hidden: limited.hidden, ...note ? { note } : {} };
+    } catch (error) {
+      if (mustRethrow(error))
+        throw error;
+      return { id: spec.id, title: spec.title, unit: spec.unit, series: [], hidden: 0, error: error instanceof Error ? clip(error.message, 160) : "Could not read this chart." };
+    }
+  }));
+  if (charts.every((chart) => chart.error))
+    forgetDetection(target);
+  const answer = { ...base, available: true, via: found.via, service: `${found.service.namespace}/${found.service.name}`, charts };
+  chartCache.set(cacheKey, { at: Date.now(), value: answer });
+  if (chartCache.size > 100) {
+    for (const [old, entry] of chartCache)
+      if (Date.now() - entry.at > CHART_CACHE_MS)
+        chartCache.delete(old);
+  }
+  return answer;
+};
+var describeDetection = (found) => found.found ? { found: true, namespace: found.service.namespace, service: found.service.name, port: found.service.port, via: found.via, source: found.source } : { found: false, reason: found.reason, source: found.source, tried: found.tried.map((service) => `${service.namespace}/${service.name}:${service.port}`) };
+
 // src/service/routes.ts
 var text3 = (params, key) => {
   const value = params[key];
@@ -9605,7 +10250,7 @@ var routes = {
   "POST /watch": async (params) => {
     const target = await targetFor(params);
     const info = await resolveKind(target, need(params, "kind"));
-    return { ok: true, kind: info, ...await openWatch(target, info, namespaceOf(params)) };
+    return { ok: true, kind: info, ...await openWatch(target, info, namespaceOf(params), text3(params, "fieldSelector") ?? null) };
   },
   "POST /watch/lease": async (params) => {
     const ids = Array.isArray(params.watchIds) ? params.watchIds.filter((id) => typeof id === "string") : [];
@@ -9988,6 +10633,47 @@ var routes = {
     stopForward(id);
     return { ok: true, forwards: listForwards() };
   },
+  "GET /metrics": async (params) => {
+    const target = await targetFor(params);
+    const nodes = flag(params, "nodes");
+    const pods = flag(params, "pods");
+    if (!nodes && !pods)
+      throw new K8sError("BAD_REQUEST", "Ask for nodes, pods or both.");
+    return { ok: true, ...await readMetrics(target, { nodes, pods, disk: flag(params, "disk"), namespace: namespaceOf(params) }) };
+  },
+  "GET /prometheus": async (params) => {
+    const target = await targetFor(params);
+    return { ok: true, ...describeDetection(await detect(target, flag(params, "refresh"))) };
+  },
+  "POST /prometheus/service": async (params) => {
+    const target = await targetFor(params);
+    if (flag(params, "clear")) {
+      writeOverride(target.context, null);
+    } else {
+      const parsed = parsePromService({ namespace: params.namespace, service: params.service, port: params.port });
+      if (typeof parsed === "string")
+        throw new K8sError("BAD_REQUEST", parsed);
+      writeOverride(target.context, parsed);
+    }
+    forgetDetection(target);
+    return { ok: true, ...describeDetection(await detect(target, true)) };
+  },
+  "POST /prometheus/charts": async (params) => {
+    const target = await targetFor(params);
+    const scope = need(params, "scope");
+    const name = need(params, "name");
+    let chart;
+    if (scope === "node") {
+      const addresses = Array.isArray(params.addresses) ? params.addresses.filter((entry) => typeof entry === "string").slice(0, 8) : [];
+      chart = { scope: "node", name, addresses };
+    } else if (scope === "pod")
+      chart = { scope: "pod", namespace: need(params, "namespace"), name };
+    else if (scope === "workload")
+      chart = { scope: "workload", kind: need(params, "kind"), namespace: need(params, "namespace"), name };
+    else
+      throw new K8sError("BAD_REQUEST", "Charts are for a pod, a workload or a node.");
+    return { ok: true, ...await readCharts(target, chart) };
+  },
   "GET /audit": async (params) => {
     const limit = Math.min(500, Math.max(1, Number(params.limit) || 100));
     const project = text3(params, "dir");
@@ -9999,6 +10685,7 @@ var routes = {
 var shutdownRoutes = () => {
   closeAllWatches();
   closeAllLogs();
+  closePrometheusForwards();
 };
 
 // src/service/main.ts
@@ -10018,7 +10705,7 @@ var parseBody = (body) => {
 var send2 = (res, status, body) => {
   res.writeHead(status, { "Content-Type": "application/json" }).end(JSON.stringify(body));
 };
-http2.createServer((req, res) => {
+http3.createServer((req, res) => {
   if (req.headers.authorization !== `Bearer ${token}`) {
     res.writeHead(401).end();
     return;

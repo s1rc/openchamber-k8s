@@ -1,7 +1,7 @@
 import type { HostReadyContext } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
 import { useEffect, useMemo, useState } from 'preact/hooks';
-import { DEFAULT_KIND, NAV } from '../shared/kinds.ts';
+import { CLUSTER_OVERVIEW, DEFAULT_KIND, NAV, WORKLOADS_OVERVIEW } from '../shared/kinds.ts';
 import type { Obj, ScopeResult } from '../shared/types.ts';
 import { ActivityView } from './ActivityView.tsx';
 import { Dock, type DockTab } from './dock/Dock.tsx';
@@ -13,6 +13,8 @@ import { Button, Empty, Select, Spinner } from './kit.tsx';
 import { LockBanner } from './LockBanner.tsx';
 import { Modal } from './Modal.tsx';
 import { Nav } from './Nav.tsx';
+import { ClusterOverview } from './overview/ClusterOverview.tsx';
+import { WorkloadsOverview } from './overview/WorkloadsOverview.tsx';
 import { ResourceView } from './ResourceView.tsx';
 import type { Live } from './useWatch.ts';
 import { onLock } from './watches.ts';
@@ -202,20 +204,28 @@ export const App = () => {
   } else if (kind === 'PortForwards') {
     main = <ForwardsSection context={sel.context} />;
   } else {
-    const view = (
-      <ResourceView
-        key={`${sel.context}|${sel.namespace}|${kind}`}
-        context={sel.context}
-        namespace={sel.namespace}
-        kind={kind}
-        dir={dir}
-        layout={layout}
-        onLive={setLive}
-        onOpenLogs={openLogs}
-        onOpenConsole={openConsole}
-        lead={layout === 'rail' ? <Select value={kind} options={sectionOptions} onChange={setKind} searchable searchPlaceholder="Search resources" /> : undefined}
-      />
-    );
+    const lead = layout === 'rail' ? <Select value={kind} options={sectionOptions} onChange={setKind} searchable searchPlaceholder="Search resources" /> : undefined;
+    let view;
+    if (kind === CLUSTER_OVERVIEW) {
+      view = <ClusterOverview key={sel.context} context={sel.context} dir={dir} layout={layout} lead={lead} onLive={setLive} onNavigate={setKind} />;
+    } else if (kind === WORKLOADS_OVERVIEW) {
+      view = <WorkloadsOverview key={`${sel.context}|${sel.namespace}`} context={sel.context} namespace={sel.namespace} dir={dir} layout={layout} lead={lead} onLive={setLive} onNavigate={setKind} />;
+    } else {
+      view = (
+        <ResourceView
+          key={`${sel.context}|${sel.namespace}|${kind}`}
+          context={sel.context}
+          namespace={sel.namespace}
+          kind={kind}
+          dir={dir}
+          layout={layout}
+          onLive={setLive}
+          onOpenLogs={openLogs}
+          onOpenConsole={openConsole}
+          lead={lead}
+        />
+      );
+    }
     main = layout === 'page' ? <div class="k8s-body"><Nav kind={kind} onPick={setKind} /><div class="k8s-content">{view}</div></div> : view;
   }
 

@@ -82,7 +82,7 @@ const save = (): void => {
   }
 };
 
-const freePort = (): Promise<number> =>
+export const freePort = (): Promise<number> =>
   new Promise((resolve, reject) => {
     const server = createServer();
     server.unref();

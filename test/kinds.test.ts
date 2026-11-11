@@ -11,6 +11,8 @@ import {
   KINDS,
   NAV,
   navLabel,
+  OVERVIEW_KINDS,
+  SPECIAL_KINDS,
   podStatus,
   rowText,
   sortRows,
@@ -68,8 +70,8 @@ describe('kindPath', () => {
 const NOW = Date.parse('2026-11-11T12:00:00Z');
 const infoOf = (kind: string): KindInfo => findKind(kind)!;
 const navKinds = NAV.flatMap((section) => section.items.map((item) => item.kind));
-// Port forwarding is a view over the service's forwards, not a kind.
-const viewKinds = navKinds.filter((kind) => kind !== 'PortForwards');
+// The overviews and port forwarding are drawn by the panel itself, not listed from the cluster.
+const viewKinds = navKinds.filter((kind) => !SPECIAL_KINDS.has(kind));
 
 describe('navigation', () => {
   test('every kind in the plan table is there, once, and has a registry entry', () => {
@@ -86,8 +88,18 @@ describe('navigation', () => {
     expect(findKind('PortForwards')).toBeUndefined();
   });
 
+  test('Cluster and Workloads each lead with an Overview, and the cluster one is the default', () => {
+    expect(NAV[0]).toMatchObject({ id: 'cluster', heading: true, items: [{ kind: 'ClusterOverview', title: 'Overview' }] });
+    expect(NAV.find((section) => section.id === 'workloads')!.items[0]).toEqual({ kind: 'WorkloadsOverview', title: 'Overview' });
+    expect([...OVERVIEW_KINDS].sort()).toEqual(['ClusterOverview', 'WorkloadsOverview']);
+    for (const kind of OVERVIEW_KINDS) expect(findKind(kind)).toBeUndefined();
+    expect(DEFAULT_KIND).toBe('ClusterOverview');
+  });
+
   test('the default kind is in the navigation and has a label', () => {
-    expect(viewKinds).toContain(DEFAULT_KIND);
+    expect(navKinds).toContain(DEFAULT_KIND);
+    expect(navLabel('ClusterOverview')).toEqual({ section: 'Cluster', title: 'Overview' });
+    expect(navLabel('WorkloadsOverview')).toEqual({ section: 'Workloads', title: 'Overview' });
     expect(navLabel('Pod')).toEqual({ section: 'Workloads', title: 'Pods' });
     expect(navLabel('Nothing')).toBeNull();
   });

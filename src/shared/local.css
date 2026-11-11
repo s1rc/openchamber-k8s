@@ -180,3 +180,49 @@ body { font-family: var(--oc-font, system-ui, sans-serif); font-size: 13px; }
 .k8s-drain-pod { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border: 1px solid var(--oc-border); border-radius: var(--oc-radius, 8px); min-width: 0; }
 .k8s-yaml--wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
 .k8s-conflict { display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--oc-warning); border-radius: var(--oc-radius, 8px); background: color-mix(in srgb, var(--oc-warning) 10%, transparent); }
+
+/* Usage columns and the line above a table */
+.k8s-usage-bar { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
+.k8s-meter { display: flex; flex-direction: column; justify-content: center; gap: 3px; width: 100%; min-width: 0; }
+.k8s-td[data-align="end"] .k8s-meter > .k8s-ellipsis { text-align: right; }
+.k8s-meter-bar { display: block; height: 3px; border-radius: 2px; background: var(--oc-border); overflow: hidden; }
+.k8s-meter-bar > span { display: block; height: 100%; border-radius: 2px; background: var(--oc-primary); }
+.k8s-meter-bar[data-tone="warning"] > span { background: var(--oc-warning); }
+.k8s-meter-bar[data-tone="error"] > span { background: var(--oc-error); }
+
+/* Overviews */
+.k8s-ov { display: flex; flex-direction: column; gap: 14px; padding: 12px; min-width: 0; }
+.k8s-ov-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; align-items: start; }
+.k8s-warnings { display: flex; flex-direction: column; gap: 6px; }
+.k8s-warning { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; border: 1px solid var(--oc-border); border-radius: var(--oc-radius, 8px); background: var(--oc-elevated); min-width: 0; }
+.k8s-warning-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.k8s-warning-head > .sui-mono { flex: 0 1 auto; }
+.k8s-warning-head > .k8s-push { flex: none; white-space: nowrap; }
+.k8s-warnings-foot { display: flex; align-items: center; gap: 8px; }
+.k8s-sources { display: flex; flex-direction: column; gap: 8px; }
+.k8s-source { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; }
+.k8s-source-line { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.k8s-source-actions { display: inline-flex; gap: 6px; margin-left: auto; }
+.k8s-source > .sui-muted { flex: 1 1 100%; }
+
+/* Charts (colors are theme colors only) */
+.k8s-charts { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.k8s-charts-head { display: flex; align-items: center; gap: 8px; }
+.k8s-chart { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.k8s-chart-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-width: 0; }
+.k8s-chart-legend { display: inline-flex; flex-wrap: wrap; gap: 2px 12px; min-width: 0; }
+.k8s-chart-key { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; }
+.k8s-chart-readout { min-height: 1.2em; color: var(--oc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.k8s-chart-empty { padding: 10px; border: 1px dashed var(--oc-border); border-radius: var(--oc-radius, 8px); }
+.k8s-chart-svg { display: block; max-width: 100%; touch-action: none; }
+.k8s-series-0 { --series: var(--oc-primary); }
+.k8s-series-1 { --series: var(--oc-info); }
+.k8s-series-2 { --series: var(--oc-warning); }
+.k8s-series-3 { --series: var(--oc-muted); }
+.k8s-swatch { flex: none; width: 10px; height: 10px; border-radius: 3px; background: var(--series); }
+.k8s-line { fill: none; stroke: var(--series); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
+.k8s-point { fill: var(--series); }
+.k8s-area { stroke: none; fill: color-mix(in srgb, var(--series) 14%, transparent); }
+.k8s-grid-line { stroke: var(--oc-border); stroke-width: 1; }
+.k8s-axis { fill: var(--oc-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.k8s-hover-line { stroke: var(--oc-muted); stroke-width: 1; stroke-dasharray: 3 3; }

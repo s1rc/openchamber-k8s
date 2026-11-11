@@ -218,6 +218,7 @@ Follow via `GET /api/v1/namespaces/<ns>/pods/<pod>/log?follow=true&timestamps=tr
 
 - metrics-server: `/apis/metrics.k8s.io/v1beta1/nodes` and `.../pods`. If missing, show "Install metrics-server for usage" in the overview, not an error.
 - Prometheus detection per context: Services labelled `app.kubernetes.io/name` in `prometheus`, `kube-prometheus-stack-prometheus`, or named `prometheus-*`, `prometheus-operated`. User override in the context menu ("Prometheus service"). Queries through the service proxy: CPU, memory, network, filesystem per pod, node and workload, last 1 h at 60 s step (Lens's default queries are the model). Charts are local SVG using `--oc-primary`, `--oc-info`, `--oc-warning`, `--oc-muted`.
+  - **Changed in Phase 4:** the service proxy to a pod port does not work on every cluster (staging's API server cannot reach port 9090). When the proxy does not answer, the service reaches Prometheus through a hidden `kubectl port-forward` of its own (see "Phase 4 results").
 
 ### EKS discovery and sign-in
 
@@ -483,13 +484,59 @@ Not verified:
 - The OIDC sign-in path and any `northwind-*` cluster (not touched, by the rules).
 - The extension installed inside the OpenChamber app: Phase 3 was checked in the scratch harness and against the service directly.
 
-### Phase 4: overviews and metrics (about 2 h) - NEXT
+### Phase 4: overviews and metrics (about 2 h) - DONE
 
 Cluster overview, workloads overview, metrics-server usage in tables and drawer, Prometheus detection and charts.
 
 Done when: overview numbers match `kubectl top nodes`, charts draw when Prometheus exists and the overview explains what is missing when not.
 
-### Phase 5: Helm, custom resources, GitOps (about 2 h)
+**Phase 4 results** (built and checked on `initech-staging-us-east-1`, reads only, plus one approved port forward; throwaway `K8S_STATE_DIR`):
+
+- Stopped before building and reported: the plan's way to reach Prometheus (API server service proxy) times out on staging for `kube-system/prometheus-server` (and for kube-state-metrics): the API server can reach metrics-server's port but not 9090 or 8080 on pods. You chose "proxy first, hidden port forward as fallback" and approved one real forward to `kube-system/svc/prometheus-server:80` for the check. That is what is built.
+- Service additions (all reads; every failure is `{ ok: false, code, error }`):
+  - `GET /metrics?context&nodes=1&pods=1&disk=1&namespace=`: metrics-server (`/apis/metrics.k8s.io/v1beta1`), compacted to numbers (cores, bytes). A cluster without it answers `status: missing`, one whose APIService has no healthy pod `unavailable` (503), no permission `forbidden`. None of these is an error code. `disk=1` reads each node's root disk from the kubelet (`/api/v1/nodes/<n>/proxy/stats/summary`, 6 at a time, 8 s each), because metrics-server has no disk usage; `diskStatus` says when that was not readable. 10 s cache (30 s for disk) so the rail and the page do not ask twice.
+  - `GET /prometheus?context&refresh=1`: finds the server (Services in all namespaces, ranked by the plan's labels and names; alertmanager, exporters, kube-state-metrics, pushgateway, operator and adapter are skipped), probes `vector(1)` through the proxy (6 s), then through a hidden port forward. Answer: `found`, `namespace`, `service`, `port`, `via` (`proxy` or `forward`), `source` (`detected` or `override`), or `found: false` with `reason` `none`, `forbidden` or `unreachable`. Kept 10 minutes (1 minute when nothing was found).
+  - `POST /prometheus/service`: the user's own Service for a context (`{ namespace, service, port }` or `{ clear: true }`), saved in `prometheus.json` in the state folder (service-only, the plugin does not read it), then detected again.
+  - `POST /prometheus/charts`: `{ scope: pod | workload | node, namespace, name, kind?, addresses? }`. The queries are fixed in `src/shared/prom.ts`; only validated names go in, escaped for PromQL. CPU, memory, network (received, sent) and filesystem, last hour at 60 s, rate window 5 m (wider than a 1 minute scrape). At most 4 series per chart (the biggest), 15 s cache.
+  - `POST /watch` takes an optional `fieldSelector` (part of the watch's identity), used for `type=Warning` events.
+  - New files `src/service/metrics.ts`, `src/service/prometheus.ts`; `forwards.ts` exports `freePort`; `routes.ts` closes the hidden forwards on shutdown.
+- The hidden forward: `kubectl port-forward svc/<name> <free port>:<port>`, not listed under Port forwarding, not written to `forwards.json`, stopped after 5 idle minutes and on shutdown, pid file `sock/fwd-prom-*.pid` (the existing stale cleanup removes it after a crash). It is a read, so it is not locked, and it also opens on production contexts when someone opens the Cluster overview or a Metrics tab.
+- Shared (pure, tested): `metrics.ts` (compacting metrics-server answers, `usageNote`), `overview.ts` (`podRequests` with init containers, sidecars and overhead, `clusterTotals`, `summarize`, `warningEvents`), `prom.ts` (candidate ranking, queries, series parsing, chart maths). `format.ts` reads nano and micro cores (`123456789n`).
+- Navigation: Cluster > Overview (new default) and Workloads > Overview (first item). Both are special kinds (`ClusterOverview`, `WorkloadsOverview`, like `PortForwards`), drawn by the panel, in rail and page layout.
+- Cluster overview: Nodes, Pods and Warnings cards (click opens that list); CPU and Memory cards with Usage and Requests bars (kit Progress, amber from 75%, red from 90%) over Allocatable, Capacity and Limits; Pods card (scheduled of capacity, running, pending, failed); the newest 8 warning events; "Where the numbers come from" (metrics-server state and Refresh usage, Prometheus service and via, Choose service). It is cluster-wide whatever namespace is picked. It uses watches for Nodes, Pods and Warning events, so it updates live. Without metrics-server the usage line says "Install metrics-server for usage" and nothing is an error; without Prometheus the card says what is missing and offers Choose service and Look again.
+- Workloads overview: stat cards for Pods, Deployments, DaemonSets, StatefulSets, ReplicaSets, Jobs and CronJobs with counts by health (each opens the list), then the namespace's warning events. Follows the namespace picker.
+- Usage in tables: the rail's Node list now shows CPU (`CPU 0.05 / 3.92`) instead of the version, which is the same on every node. Nodes CPU, Memory and Disk show `used / size` with a thin bar (a node metrics-server has not measured yet shows `- / size`, never a bare size; with no metrics-server they show allocatable as before). Pods got CPU and Memory columns. Both tables show "Usage as of HH:MM:SS" and a Refresh usage button. The drawer's Overview has a Usage section for pods (against limit, else request) and nodes.
+- Metrics tab (Pods, Nodes, Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs): four SVG charts, theme colors only (`--oc-primary`, `--oc-info`, `--oc-warning`, `--oc-muted`), hover readout, legend with the latest value, a dot for a series with one reading (a brand new pod or node). Workloads are matched to their pods by name pattern (`name-<hash>-<id>` for Deployments, `name-<n>` for StatefulSets and so on). Nodes are matched on node_exporter's `instance` by name or address.
+- Tests: `bun test` runs 262 tests in 18 files (new: `metrics`, `overview`, `prom`; `kinds` updated for the two Overview entries and the new default).
+
+Checked live on staging:
+
+- Overview against kubectl, taken at the same moment from the same JSON: nodes 9, CPU allocatable 111.09 cores, memory allocatable 194.9 GiB, pod capacity 834, requests 33.84 cores and 55.14 GiB, 107 scheduled pods; the panel's `clusterTotals` and an independent Python sum agree to the digit. Usage: panel 8.197 cores and 25.81 GiB against `kubectl top nodes` summed 8.202 cores and 25.81 GiB (kubectl rounds each node to whole millicores and truncates memory to Mi). Per node, CPU matched `kubectl top nodes` to within 1m and memory to within 1 MiB.
+- Disk from the kubelet worked on all nodes (about 12 of 49.9 GiB used on the first node). Pod usage in `initech` matched `kubectl top pods` for the pods compared.
+- Prometheus: detected `kube-system/prometheus-server` (port 80, label `app.kubernetes.io/name=prometheus`), proxy timed out, hidden forward answered. Charts for a pod (per container CPU and memory, network), a Deployment (totals) and a node (CPU percent, memory, network, filesystem) all returned 38 to 61 points. A name with a quote and a PromQL fragment was refused with `BAD_REQUEST` and never reached Prometheus. Setting an override to a Service that does not exist answered `found: false, unreachable`; clearing it detected `prometheus-server` again. A `type=Warning` watch returned only warnings (8 of the 795 events).
+- The hidden forward's lifetime: it stopped by itself about 6 minutes after its last use (5 idle minutes plus the sweep), and it was gone each time the service was stopped by a rebuild.
+- Screenshots (light and dark, page 1100px and rail 360px): both overviews, Nodes and Pods tables, node and pod drawers (Usage and Metrics), a Deployment's Metrics, a chart hover, and with `metrics-missing` plus `prom-none` and with `metrics-down` plus `prom-unreachable` (injected in the scratch harness) the overview, Nodes, the Metrics tab and the Choose service dialog. I looked at: page dark overview (top and bottom), rail light overview, page dark workloads overview, rail dark and page light overview with nothing installed, rail light overview with metrics-server down and Prometheus unreachable, page dark and light Nodes, page light node drawer with Usage, page dark node Metrics, rail dark Nodes list and node Metrics, page light Pods and pod Metrics with hover, page dark node Metrics with nothing installed, rail light Choose service dialog. Taken but not looked at: the other light and rail variants.
+
+Decisions and changes from the plan:
+
+- Prometheus transport: proxy first, then a hidden port forward (above). The first detection on staging takes about 8 seconds (6 s proxy timeout, then the forward); after that it is cached for 10 minutes.
+- Usage has no timer. metrics-server cannot be watched, so usage is read when a view opens, when the panel becomes visible again with numbers older than 20 seconds, and on Refresh usage. The overviews and tables update live for everything else. If you want usage to follow the lease timer instead, it is one `setInterval` in `useUsage.ts`.
+- Disk usage comes from the kubelet through the API server (metrics-server has none), not from Prometheus. A node whose kubelet does not answer shows allocatable instead and the bar says "Disk usage is not readable here".
+- Pod and workload Filesystem: this Prometheus has `container_fs_usage_bytes` only for the node root (containerd on EKS), so the chart falls back to `kubelet_container_log_filesystem_used_bytes` and says so ("This cluster does not report disk use per container. Showing the size of the log files instead.").
+- Percent charts (node CPU) start from the data's scale (at least 0 to 10%) and stop at 100%, so a quiet node is not a flat line. Byte charts round in steps of 1024.
+- "Prometheus service" override lives in the Cluster overview ("Change service", "Choose service") and in an empty Metrics tab, not in a context menu (the header has no context menu).
+- The Cluster overview opens a Prometheus detection as soon as it is shown (a read of Services plus a probe, and a hidden forward if the proxy fails). It is the default section, so that happens on every cluster you open. Tell me if you would rather detect only when a Metrics tab or "Look again" asks.
+- The page layout's bottom dock keeps its 300px, so on a short window the overview scrolls. Resize the dock or close it to see more.
+
+Not verified:
+
+- A cluster whose API server can reach Prometheus through the service proxy (`via: proxy`): staging cannot, so that path only has the code and the unit tests. Same for a real cluster with no metrics-server or no Prometheus: those states were drawn with injected answers in the scratch harness, and the service mapping (`NOT_FOUND`, 503 and `FORBIDDEN` to `missing`, `unavailable`, `forbidden`) is unit-tested.
+- `container_cpu` and network charts for a DaemonSet, StatefulSet or Job (no workload of those kinds was opened on staging beyond the name patterns in tests); node charts on a cluster without node_exporter.
+- A service crash (not a normal stop) with a hidden forward open: the next start removes `fwd-prom-*.pid` files the same way as for forwards, but a killed service was not simulated here.
+- Production and `northwind-*` clusters (not touched, by the rules), and the extension in the installed app beyond the live reload that came with each rebuild.
+
+
+### Phase 5: Helm, custom resources, GitOps (about 2 h) - NEXT
 
 Helm releases with values, manifest, history, rollback, upgrade with edited values, uninstall. Chart repo search and install only if time allows (mark as stretch). CRD browser with printer columns. Flux and Argo views when their CRDs exist.
 

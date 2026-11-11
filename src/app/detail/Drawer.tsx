@@ -1,16 +1,18 @@
 import { useEffect, useState } from 'preact/hooks';
 import { Dot } from '@openchamber-ext/shared-ui/preact';
 import { podSpecOf, statusOf, type KindView } from '../../shared/kinds.ts';
+import type { UsageSet } from '../../shared/metrics.ts';
 import type { Obj } from '../../shared/types.ts';
 import { Banner, Button, Tabs } from '../kit.tsx';
 import { ConsoleView } from '../dock/ConsoleView.tsx';
 import { LogView } from '../dock/LogView.tsx';
 import { Actions } from './Actions.tsx';
 import { EventsTab } from './EventsTab.tsx';
+import { Metrics, METRIC_KINDS } from './Metrics.tsx';
 import { Overview } from './Overview.tsx';
 import { Yaml } from './Yaml.tsx';
 
-type TabId = 'overview' | 'yaml' | 'events' | 'logs' | 'console';
+type TabId = 'overview' | 'yaml' | 'events' | 'metrics' | 'logs' | 'console';
 
 const LOG_KINDS = new Set(['Pod', 'Deployment', 'StatefulSet', 'DaemonSet', 'Job']);
 
@@ -24,6 +26,8 @@ interface Props {
   /** The panel's namespace, `_all` for every namespace. */
   namespace: string;
   now: number;
+  /** Current usage for pods and nodes; null for other kinds. */
+  usage: UsageSet | null;
   onClose: () => void;
   /** Rail layout: a Back button instead of Close. */
   rail: boolean;
@@ -37,7 +41,7 @@ const containersOf = (object: Obj): string[] => {
   return Array.isArray(spec?.containers) ? (spec.containers as Obj[]).map((container) => String(container.name)) : [];
 };
 
-export const Drawer = ({ object, gone, view, context, dir, namespace, now, onClose, rail, onOpenLogs, onOpenConsole }: Props) => {
+export const Drawer = ({ object, gone, view, context, dir, namespace, now, usage, onClose, rail, onOpenLogs, onOpenConsole }: Props) => {
   const [tab, setTab] = useState<TabId>('overview');
   const [editing, setEditing] = useState(false);
   const uid = String(object.metadata?.uid ?? `${object.metadata?.namespace}/${object.metadata?.name}`);
@@ -73,6 +77,7 @@ export const Drawer = ({ object, gone, view, context, dir, namespace, now, onClo
     { id: 'overview', label: 'Overview' },
     { id: 'yaml', label: 'YAML' },
     { id: 'events', label: 'Events' },
+    ...(METRIC_KINDS.has(kind) ? [{ id: 'metrics', label: 'Metrics' }] : []),
     ...(rail && supportsLogs ? [{ id: 'logs', label: 'Logs' }] : []),
     ...(rail && kind === 'Pod' ? [{ id: 'console', label: 'Console' }] : []),
   ];
@@ -114,11 +119,12 @@ export const Drawer = ({ object, gone, view, context, dir, namespace, now, onClo
         }} />
       </div>
       <div class={`k8s-drawer-body${tab === 'logs' || tab === 'console' ? ' k8s-drawer-body--fill' : ''}`}>
-        {tab === 'overview' ? <Overview object={object} view={view} now={now} context={context} namespace={objectNamespace || 'default'} /> : null}
+        {tab === 'overview' ? <Overview object={object} view={view} now={now} context={context} namespace={objectNamespace || 'default'} usage={usage} /> : null}
         {tab === 'yaml' ? (
           <Yaml object={object} context={context} dir={dir} namespace={objectNamespace} editing={editing} onEditing={(value) => setEditing(value)} />
         ) : null}
         {tab === 'events' ? <EventsTab context={context} dir={dir} object={object} now={now} /> : null}
+        {tab === 'metrics' ? <Metrics object={object} context={context} dir={dir} /> : null}
         {tab === 'logs' ? (
           <LogView context={context} dir={dir} namespace={objectNamespace || 'default'} object={object} onClose={() => setTab('overview')} />
         ) : null}

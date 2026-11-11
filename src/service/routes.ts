@@ -1,5 +1,6 @@
 import { isLocked, isProtected, lock, setProtected, unlock, unlockedUntil } from '../shared/locks.ts';
 import { forPanel } from '../shared/redact.ts';
+import { parsePromService, type ChartScope } from '../shared/prom.ts';
 import { isSecret, kindPath, RESTARTABLE, SCALABLE, type KindInfo } from '../shared/kinds.ts';
 import {
   argoPatch,
@@ -24,6 +25,8 @@ import { appendAudit, readAudit, readLocks, readPicks, writeLocks, writePick } f
 import { kubeconfigArgs, kubectlPath, run } from './exec.ts';
 import { createForward, listForwards, stopForward } from './forwards.ts';
 import { closeAllLogs, renewLogLeases, startLogs, stopLogs } from './logs.ts';
+import { readMetrics } from './metrics.ts';
+import { closePrometheusForwards, describeDetection, detect, forgetDetection, readCharts, writeOverride } from './prometheus.ts';
 import { closeAllWatches, openWatch, publish, renewLeases } from './watch.ts';
 
 type Params = Record<string, unknown>;
@@ -215,7 +218,7 @@ export const routes: Record<string, RouteHandler> = {
   'POST /watch': async (params) => {
     const target = await targetFor(params);
     const info = await resolveKind(target, need(params, 'kind'));
-    return { ok: true, kind: info, ...(await openWatch(target, info, namespaceOf(params))) };
+    return { ok: true, kind: info, ...(await openWatch(target, info, namespaceOf(params), text(params, 'fieldSelector') ?? null)) };
   },
 
   'POST /watch/lease': async (params) => {
@@ -599,6 +602,50 @@ export const routes: Record<string, RouteHandler> = {
     return { ok: true, forwards: listForwards() };
   },
 
+  /** Usage from metrics-server. A cluster without it answers `status: missing`, not an error. */
+  'GET /metrics': async (params) => {
+    const target = await targetFor(params);
+    const nodes = flag(params, 'nodes');
+    const pods = flag(params, 'pods');
+    if (!nodes && !pods) throw new K8sError('BAD_REQUEST', 'Ask for nodes, pods or both.');
+    return { ok: true, ...(await readMetrics(target, { nodes, pods, disk: flag(params, 'disk'), namespace: namespaceOf(params) })) };
+  },
+
+  /** Which Prometheus the cluster has, and whether the service can reach it. */
+  'GET /prometheus': async (params) => {
+    const target = await targetFor(params);
+    return { ok: true, ...describeDetection(await detect(target, flag(params, 'refresh'))) };
+  },
+
+  /** The user's own choice of Prometheus service for a context. An empty service clears it. */
+  'POST /prometheus/service': async (params) => {
+    const target = await targetFor(params);
+    if (flag(params, 'clear')) {
+      writeOverride(target.context, null);
+    } else {
+      const parsed = parsePromService({ namespace: params.namespace, service: params.service, port: params.port });
+      if (typeof parsed === 'string') throw new K8sError('BAD_REQUEST', parsed);
+      writeOverride(target.context, parsed);
+    }
+    forgetDetection(target);
+    return { ok: true, ...describeDetection(await detect(target, true)) };
+  },
+
+  /** The last hour of CPU, memory, network and filesystem. The queries are fixed; only names go into them. */
+  'POST /prometheus/charts': async (params) => {
+    const target = await targetFor(params);
+    const scope = need(params, 'scope');
+    const name = need(params, 'name');
+    let chart: ChartScope;
+    if (scope === 'node') {
+      const addresses = Array.isArray(params.addresses) ? params.addresses.filter((entry): entry is string => typeof entry === 'string').slice(0, 8) : [];
+      chart = { scope: 'node', name, addresses };
+    } else if (scope === 'pod') chart = { scope: 'pod', namespace: need(params, 'namespace'), name };
+    else if (scope === 'workload') chart = { scope: 'workload', kind: need(params, 'kind'), namespace: need(params, 'namespace'), name };
+    else throw new K8sError('BAD_REQUEST', 'Charts are for a pod, a workload or a node.');
+    return { ok: true, ...(await readCharts(target, chart)) };
+  },
+
   'GET /audit': async (params) => {
     const limit = Math.min(500, Math.max(1, Number(params.limit) || 100));
     const project = text(params, 'dir');
@@ -616,4 +663,5 @@ export const routes: Record<string, RouteHandler> = {
 export const shutdownRoutes = (): void => {
   closeAllWatches();
   closeAllLogs();
+  closePrometheusForwards();
 };

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { Dot } from '@openchamber-ext/shared-ui/preact';
-import { cellText, containerStates, type Column, type KindView } from '../shared/kinds.ts';
+import { cellText, containerStates, type Column, type KindView, type ViewContext } from '../shared/kinds.ts';
+import { barTone } from '../shared/overview.ts';
 import type { Obj } from '../shared/types.ts';
 import { objectKey } from './apply-events.ts';
 
@@ -18,6 +19,8 @@ interface Props {
   selectedKey: string | null;
   onSelect: (key: string) => void;
   now: number;
+  /** Live usage for the CPU, memory and disk columns. */
+  ctx?: ViewContext;
 }
 
 const ROW_H = 30;
@@ -31,7 +34,7 @@ const minOf = (width: string | undefined): number => {
   return match ? Number(match[1]) : 100;
 };
 
-const Cell = ({ column, object, view, now }: { column: Column; object: Obj; view: KindView; now: number }) => {
+const Cell = ({ column, object, view, now, ctx }: { column: Column; object: Obj; view: KindView; now: number; ctx?: ViewContext }) => {
   if (column.cell === 'status') {
     const status = view.status?.(object);
     if (!status) return <span>{cellText(column, object, now)}</span>;
@@ -50,11 +53,21 @@ const Cell = ({ column, object, view, now }: { column: Column; object: Obj; view
       </span>
     );
   }
-  const value = cellText(column, object, now);
+  const value = cellText(column, object, now, ctx);
+  if (column.cell === 'meter') {
+    const meter = column.meter?.(object, ctx) ?? null;
+    const fraction = meter?.fraction ?? null;
+    return (
+      <span class="k8s-meter" title={value}>
+        <span class="k8s-ellipsis">{value}</span>
+        {fraction !== null ? <span class="k8s-meter-bar" data-tone={barTone(fraction)}><span style={{ width: `${Math.min(100, Math.max(2, Math.round(fraction * 100)))}%` }} /></span> : null}
+      </span>
+    );
+  }
   return <span class={`k8s-ellipsis${column.cell === 'mono' ? ' sui-mono' : ''}`} title={column.cell === 'age' ? undefined : value}>{value}</span>;
 };
 
-export const Table = ({ view, columns, rows, sort, onSort, selectedKey, onSelect, now }: Props) => {
+export const Table = ({ view, columns, rows, sort, onSort, selectedKey, onSelect, now, ctx }: Props) => {
   const scroller = useRef<HTMLDivElement>(null);
   const [top, setTop] = useState(0);
   const [height, setHeight] = useState(600);
@@ -138,7 +151,7 @@ export const Table = ({ view, columns, rows, sort, onSort, selectedKey, onSelect
             >
               {columns.map((column) => (
                 <div role="gridcell" class="k8s-td" data-align={column.align}>
-                  <Cell column={column} object={object} view={view} now={now} />
+                  <Cell column={column} object={object} view={view} now={now} ctx={ctx} />
                 </div>
               ))}
             </div>
