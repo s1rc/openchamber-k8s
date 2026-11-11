@@ -37,6 +37,9 @@ const send = (topic: string, data: unknown): void => {
   }, EMIT_GAP_MS);
 };
 
+/** Pushes any topic through the same rate-limited queue as watch events. */
+export const publish = (topic: string, data: unknown): void => send(topic, data);
+
 export interface WatchEvent {
   type: 'ADDED' | 'MODIFIED' | 'DELETED' | 'RESET';
   object?: Obj;

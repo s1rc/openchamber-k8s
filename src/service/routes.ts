@@ -8,7 +8,7 @@ import { callJson, resolveKind } from './k8s.ts';
 import { contextInfo, loadKubeconfig } from './kubeconfig.ts';
 import { createScopeCache, readAwsProfiles, resolveScope } from './scope.ts';
 import { appendAudit, readLocks, readPicks, writeLocks, writePick } from './state.ts';
-import { closeAllWatches, openWatch, renewLeases } from './watch.ts';
+import { closeAllWatches, openWatch, publish, renewLeases } from './watch.ts';
 
 type Params = Record<string, unknown>;
 export type RouteHandler = (params: Params) => Promise<Obj>;
@@ -56,6 +56,19 @@ const guard = async (target: Target, dryRun: boolean): Promise<void> => {
   const info = await contextInfo(target.context, target.kubeconfig);
   if (isLocked(readLocks(), info.name, info.arn, Date.now())) {
     throw new K8sError('LOCKED', `${info.name} is protected and locked. Unlock it to make changes.`, { kind: 'unlock', context: info.name });
+  }
+};
+
+/** Tells every open frame where a context's lock stands, so the badge changes in the rail and the page together. */
+const publishLock = async (params: Params): Promise<void> => {
+  try {
+    const target = await targetFor(params);
+    const info = await contextInfo(target.context, target.kubeconfig);
+    const locks = readLocks();
+    const now = Date.now();
+    publish('lock', { context: info.name, protected: isProtected(locks, info.name, info.arn), locked: isLocked(locks, info.name, info.arn, now), unlockedUntil: unlockedUntil(locks, info.name, now) });
+  } catch {
+    // The lock file is already written; a context missing from the kubeconfig has no badge to update.
   }
 };
 
@@ -141,6 +154,7 @@ export const routes: Record<string, RouteHandler> = {
     const context = need(params, 'context');
     await contextInfo(context, (await targetFor(params)).kubeconfig);
     writeLocks(setProtected(readLocks(), context, flag(params, 'protected')));
+    await publishLock(params);
     return { ok: true };
   },
 
@@ -149,11 +163,13 @@ export const routes: Record<string, RouteHandler> = {
     const info = await contextInfo(target.context, target.kubeconfig);
     const next = unlock(readLocks(), info.name, Date.now());
     writeLocks(next);
+    await publishLock(params);
     return { ok: true, unlockedUntil: unlockedUntil(next, info.name, Date.now()) };
   },
 
   'POST /lock': async (params) => {
     writeLocks(lock(readLocks(), need(params, 'context')));
+    await publishLock(params);
     return { ok: true };
   },
 

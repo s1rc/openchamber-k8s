@@ -401,13 +401,46 @@ Decisions taken while building:
 - The `k8s_spike_plugin` tool is still in the plugin. It stays until Phase 7 so the in-app check (does OpenCode call `setup` once per project, and is `ctx.location.directory` right) can still be run there.
 - Left for later phases: `POST /approve` and the agent-side lock check (Phase 7), the per-kind columns and actions in `kinds.ts` (Phase 2), log streams (Phase 3), Sign in routes (Phase 6).
 
-### Phase 2: panel shell and resource browsing (about 3 h) - NEXT
+### Phase 2: panel shell and resource browsing (about 3 h) - DONE
 
 Preact app, both layouts, header pickers, nav, kind registry for every kind in the table above, resource table with live watch, detail drawer with Overview, YAML (read), Events. Empty, loading and every error code drawn. Secrets masked.
 
 Done when: every section lists on the staging cluster at both widths, light and dark, and a pod deleted with kubectl disappears from the table without a refresh.
 
-### Phase 3: actions, logs, shell, forwards (about 3 h)
+**Phase 2 results** (built and checked on `initech-staging-us-east-1`, reads only):
+
+- Files: `src/app/` has `App`, `Header`, `Nav`, `ResourceView`, `Table`, `errors`, `kit` (the SDK kit as Preact components), `host`, `watches` (event router and the lease timer), `useWatch`, `apply-events` (pure, tested) and `detail/` (`Drawer`, `Overview`, `Yaml`, `EventsTab`). `src/shared/kinds.ts` now holds columns, status, sorting, Overview details and the navigation for every kind; `src/shared/format.ts` holds age, quantity and byte text. `src/shared/local.css` carries the `k8s-` styles (theme colors only).
+- Layouts: page layout when `ctx.surface` is `page` and the frame is at least 720px wide (left nav, table, resizable drawer on the right); everything else is the rail layout (header, section select, search, kit list, a tap opens the detail full width with Back, Escape also closes). The bottom dock is not drawn yet (Phase 3).
+- Header: context select (searchable, sorted by AWS account, hint shows account, region and "protected"), namespace select (All namespaces plus a live Namespace watch), scope chip with the reasons as tooltip, lock badge (Locked, or Unlocked until HH:MM, only on protected contexts), live state dot (Connecting, Live, Reconnecting, Offline). Picking a context or namespace saves it with `POST /scope` when the frame has a project. No scope shows "Pick a cluster to remember it for this project"; several candidates preselect nothing and say so.
+- Table: sortable columns from the registry (click a header; age sorts youngest first), search box, keyboard up and down, rows past 300 are windowed, horizontal scroll instead of squashing, Namespace column only for "All namespaces". Rail list is the kit list (status badge, one key column), capped at 300 rows with a note.
+- Live: `POST /watch` gives the snapshot, `watch` events are applied by namespace and name (a relist keeps rows until the new ones arrive, so the table never flashes empty), events that came before the watch reply are replayed from a small buffer, objects too large to push are fetched with `GET /get`. The lease is renewed every 30 s while the panel is visible and stops when hidden; `UNKNOWN_WATCH` opens the watch again. This is the only timer in the panel.
+- Drawer: Overview (common fields, status, per-kind rows from the registry, labels and annotations as chips, containers with image, ports, resources, probes, env with secret references shown as references, mounts, a conditions table; Secrets list their keys with "Values are hidden."), YAML (read only, drawn from the live object so it updates with the watch), Events (`GET /list` with a field selector on load and on Refresh, never on a timer).
+- Errors: every code in the Errors table plus `failed` (the shared helper's code when a call itself fails) has a drawing: banners for `NO_KUBECTL`, `AUTH_EXPIRED`, `UNREACHABLE`, `LOCKED`, `CONFLICT`, `INVALID`, `BAD_REQUEST`, `K8S_ERROR`, `INTERNAL`, `UNKNOWN_WATCH`; a quiet note inside the view for `FORBIDDEN`, `NOT_FOUND`, `NO_CONTEXT`. Load failures are drawn in place; a toast only follows a click (a failed Refresh in the Events tab). Empty and loading states for every view, "No matches" with Clear search, "Choose a cluster", "No clusters found", and a "This resource was deleted" banner in the drawer.
+- Secrets: the panel never sends `reveal`; list, watch and get replies are masked by the service and the panel shows only the key names and sizes. A test checks the registry never derives text from a value.
+
+Checked live on staging:
+
+- Every kind in the navigation lists with real data at page width (1100px) and rail width (360px), light and dark (a scripted sweep drew all 36 kinds in all four combinations: rows or the empty state each time, no banner, no page error, no horizontal overflow in the rail). Kinds with nothing on staging (StatefulSet, CronJob, ResourceQuota, LimitRange, RuntimeClass, NetworkPolicy, PVC, PV) showed the empty state.
+- Live: with a Lease open in the drawer, `renewTime` and `resourceVersion` changed 9 s later with no refresh. The Event count moved (897, 901, 861, 863, 865) and the Pod count moved (105, 104, 102) over 60 s while the page stayed open, so ADDED and DELETED both arrive. Nothing was deleted or written to do this.
+- The lock badge was checked for Locked and Unlocked (staging was marked protected in a throwaway state folder, then put back; the real `~/.config/openchamber-k8s` was never touched, and no `northwind-*` or production context was opened).
+- Tests: `bun test` runs 175 tests in 11 files (new: `format`, `apply-events`, and the registry: every kind in the navigation has a well formed view that survives an empty object, pod status cases, container dots, sorting, search text, Secret masking).
+
+Decisions and changes from the plan:
+
+- Service change: `POST /unlock`, `POST /lock` and `POST /protect` now `publish('lock', { context, protected, locked, unlockedUntil })` through the same rate-limited queue as watch events (`publish` is exported from `watch.ts`), so the badge changes in the rail and the page together. No route changed behavior otherwise. The plan listed lock events for the panel, but Phase 1 never sent them.
+- The lock badge has no Unlock or Lock button yet. Nothing writes in Phase 2, so the unlock flow, the banner with the countdown and Lock now stay in Phase 3.
+- `AUTH_EXPIRED` shows the exact command to run in OpenChamber's terminal and a Try again button. The Sign in button waits for `POST /auth/login` in Phase 6.
+- The context select cannot group, so it sorts by account and shows account, region and "protected" as the hint.
+- Node CPU, Memory and Disk show allocatable (the header tooltip says so); usage arrives with metrics in Phase 4. PVC "Pods" is left out (it needs a pod lookup).
+- Custom resources lists the Definitions only; the per-CRD entries, Helm, GitOps, Port forwarding and the two Overview pages are Phases 4 and 5. Cluster and Workloads Overview are not in the navigation yet, so the default section is Pods.
+- Ages are computed when a row renders, so they refresh on every watch event but not on a timer (no timer by rule).
+- Sort order, search, the selected row, the drawer tab and the drawer width live in memory and reset when the kind, namespace or cluster changes.
+- The YAML tab uses the `yaml` package in the panel bundle (panel `main.js` is about 185 KB).
+- The shared-ui harness cannot push service events and has no way to fail a call, so for the live and error checks I used a scratch harness outside the repo (the same `harness.html` plus an event relay and a failure switch, in the temp folder). Nothing in `../shared-ui` was edited. Screenshots of every state live in the temp folder and are not committed.
+- Not done on purpose: deleting a pod with kubectl. The plan's Done-when line names it, but the rules for this phase forbid writes, so the same path (DELETED events reaching the table) was confirmed on pods and events that the cluster removed by itself.
+- Left for Phase 3: the actions menu, confirm steps, the bottom dock, the unlock flow.
+
+### Phase 3: actions, logs, shell, forwards (about 3 h) - NEXT
 
 Action menus, confirm steps, edit with dry-run diff, scale, restart, rollback, cordon, drain, cron trigger, Flux/Argo actions, logs dock, console, copy shell command, port forwards with restore, lock banner and unlock flow, audit log.
 
