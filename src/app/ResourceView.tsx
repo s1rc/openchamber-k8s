@@ -18,6 +18,9 @@ interface Props {
   /** Rail layout: the section picker, drawn in the toolbar. */
   lead?: ComponentChildren;
   onLive: (live: Live) => void;
+  /** Page layout: logs, consoles and port forwards open in the dock. */
+  onOpenLogs?: (object: Obj) => void;
+  onOpenConsole?: (object: Obj) => void;
 }
 
 const RAIL_MAX = 300;
@@ -26,7 +29,7 @@ const DRAWER_MAX = 760;
 
 const badgeTone = (tone: Tone): 'success' | 'warning' | 'error' | 'info' | 'neutral' => (tone === 'muted' ? 'neutral' : tone);
 
-export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLive }: Props) => {
+export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLive, onOpenLogs, onOpenConsole }: Props) => {
   const watch = useWatch({ context, namespace, kind, dir });
   const fallback = findKind(kind);
   const info: Pick<KindInfo, 'kind' | 'group' | 'namespaced'> = watch.info ?? fallback ?? { kind, group: '', namespaced: true };
@@ -112,7 +115,19 @@ export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLi
 
   const count = watch.phase === 'ready' ? (query.trim() ? `${rows.length} of ${watch.items.length}` : String(watch.items.length)) : '';
   const drawer = open ? (
-    <Drawer object={open} gone={Boolean(selectedKey) && !live} view={view} context={context} dir={dir} now={now} onClose={close} rail={layout === 'rail'} />
+    <Drawer
+      object={open}
+      gone={Boolean(selectedKey) && !live}
+      view={view}
+      context={context}
+      dir={dir}
+      namespace={namespace}
+      now={now}
+      onClose={close}
+      rail={layout === 'rail'}
+      onOpenLogs={onOpenLogs}
+      onOpenConsole={onOpenConsole}
+    />
   ) : null;
 
   if (layout === 'rail') {

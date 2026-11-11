@@ -440,13 +440,49 @@ Decisions and changes from the plan:
 - Not done on purpose: deleting a pod with kubectl. The plan's Done-when line names it, but the rules for this phase forbid writes, so the same path (DELETED events reaching the table) was confirmed on pods and events that the cluster removed by itself.
 - Left for Phase 3: the actions menu, confirm steps, the bottom dock, the unlock flow.
 
-### Phase 3: actions, logs, shell, forwards (about 3 h) - NEXT
+### Phase 3: actions, logs, shell, forwards (about 3 h) - DONE
 
 Action menus, confirm steps, edit with dry-run diff, scale, restart, rollback, cordon, drain, cron trigger, Flux/Argo actions, logs dock, console, copy shell command, port forwards with restore, lock banner and unlock flow, audit log.
 
 Done when: each action works on staging, each is refused on a locked production context, a port forward survives closing the panel and a service restart.
 
-### Phase 4: overviews and metrics (about 2 h)
+**Phase 3 results** (built and checked on `initech-staging-us-east-1` with a throwaway `K8S_STATE_DIR`):
+
+- Service additions (all new routes answer `{ ok: false, code, error }` on failure, writes call `guard` first and append to `audit.log`): `POST /cordon` (cordon and uncordon), `GET /drain` (the pods a drain would remove) and `POST /drain` (`kubectl drain --ignore-daemonsets --delete-emptydir-data --timeout=120s`, `--dry-run=server` for a dry run), `POST /evict` (Eviction API), `GET /revisions` and `POST /rollback` (Deployment from its ReplicaSets, StatefulSet from its ControllerRevisions; a JSON patch replaces `/spec/template`), `POST /trigger` (a Job from the CronJob template, owned by it), `POST /pause` (Deployment `spec.paused`), `POST /suspend` (CronJob and Flux `spec.suspend`), `POST /flux` (reconcile annotation, suspend, resume), `POST /argo` (refresh annotation, sync `operation`), `POST /console` (`kubectl exec -- sh -c`, 30 s, 1 MB), `POST /logs`, `POST /logs/lease`, `POST /logs/stop`, `GET /forwards`, `POST /forward`, `POST /forward/stop`, `GET /audit`. New files: `logs.ts`, `forwards.ts`. `state.ts` gained `readAudit`. `main.ts` restores forwards on start and keeps `forwards.json` on shutdown.
+- Shared (pure, tested): `shell.ts` (every value quoted, shell and node-shell commands), `actions.ts` (the Actions menu per kind), `ops.ts` (manual Job, revision history, Flux and Argo patches, drain notes, audit parsing, countdown text), and `ForwardView` in `types.ts`. `kinds.ts` NAV gained a "Port forwarding" section whose kind is `PortForwards` (not a registry kind).
+- Panel: Actions menu in the drawer header (SDK `mountMenu`), confirm dialog for delete, evict, restart, pause, trigger, suspend and sync; dialogs for scale, rollback (revision list), drain (pods listed first), port forward and Secret reveal (per key, values fetched only while the dialog is open). Edit is the YAML tab in edit mode: a server-side dry run, a line diff, then a confirm before Save; a field conflict offers "Check with force". Logs: follow with the same lease as watches (`logs` events, 250 ms batches, 60 s lease, 5 000 line cap in the frame, 10 pods merged per workload), container select, Previous, Timestamps, Wrap, search with highlight, Copy, Clear. Console: one command at a time, up and down for history. Copy shell command and a selectable command line in Overview. Port forwarding: its own section plus a dock tab (Open through `host.openUrl`, Copy, Stop). Header: Unlock and Lock now buttons, an Activity button (audit log), and a lock banner with a countdown that ticks from the local clock only.
+- Layouts: page layout has a bottom dock (Port forwarding tab always, a tab per open log or console, resizable). Rail layout has no dock: Logs and Console are drawer tabs.
+- Tests: `bun test` runs 208 tests in 15 files (new: `shell`, `actions`, `ops`, `diff`).
+
+Checked live on staging:
+
+- Real writes (objects named by you): a throwaway CronJob `openchamber-check` in `initech` was created, triggered (the Job appeared), suspended, resumed, edited (annotation, with force after a conflict with kubectl), and deleted together with its Job. `initech/initech-api` was scaled 2 to 3 and back to 2 (twice), restarted (restart annotation set, pods stayed ready), paused and resumed. Node `ip-10-0-20-63.ec2.internal` was cordoned and uncordoned (`unschedulable` true then null). Every write is in `audit.log`.
+- Dry runs only (no real write): delete, evict, rollback to a past revision, drain (`kubectl drain --dry-run=server`), scale, restart, pause.
+- Logs: a follow stream pushed batched `logs` events, the lease answered known, stop removed it, a lease for a stopped stream answered `UNKNOWN_WATCH`, a bad container answered `INVALID`.
+- Port forward: `svc/initech-admin-service:80` came up on a free port and answered HTTP 302 through it. After killing the service process the port closed, `forwards.json` kept the entry, and on the next start the forward was running again with no panel open (HTTP 302 again). Killing the kubectl child restarted it once (status live, restarts 1); killing it three more times marked it failed after 3 restarts. Stop removed it from the list and the file.
+- Lock: Unlock and Lock now published `lock` events; the panel showed the banner with the countdown and the Unlock confirm. Every one of the write routes (scale, restart, delete, cordon, drain, evict, trigger, rollback, pause, suspend, flux, argo, forward, console) answered `LOCKED` on `initech-production-us-east-1`, and no proxy socket was created for production.
+- Screenshots in light and dark at page (1100px) and rail (360px) width were taken of the table, drawer, Actions menu, logs, console, YAML edit, rollback, drain, unlock confirm, lock banner, forwards and Activity. I looked at these: page and rail logs, the Actions menu (dark and light), the YAML editor, Activity, the lock banner, the unlock confirm, rollback, drain, forwards, the rail drawer. The console, the light variants of the dialogs and the other rail shots were taken but not looked at.
+
+Decisions and changes from the plan:
+
+- A port forward counts as a write: `POST /forward` and `POST /console` are refused with `LOCKED` on a locked protected context, like the other writes (the plan only named writes; both reach into a production cluster). Logs and the shell command are reads.
+- On shutdown the service stops the kubectl children but leaves `forwards.json`, so a restart restores them. Only Stop removes an entry. A stale `fwd-*.pid` is cleaned on the next start.
+- Edit is the YAML tab, not a separate view. Secrets are edited with their values (fetched only when Edit is chosen, and a warning says so); Reveal values is a dialog, not an Overview change.
+- Drain uses `kubectl drain` (a child process), not the API, because it must cordon, respect budgets and wait. Cordon, rollback, pause, trigger, evict and the rest use the REST API.
+- Rollback replaces the pod template with the one from the chosen revision (the same result as `kubectl rollout undo --to-revision`, which `kubectl` does with a patch too).
+- Flux and Argo actions are routed and tested with patches in unit tests, but the staging cluster has no Flux or Argo CRDs, so they were not exercised live. They appear in the menu only for those groups.
+- The lock banner's countdown is a local one-second clock tick while the banner is shown (not a data poll). The only timers are the lease, this tick, and the dock.
+- "Ask agent" and Helm actions are not in the menu yet (Phases 5 and 7). Rail layout has no dock, so Port forwarding there is the nav section only.
+- The scratch harness that relays service events (`panels.emit` over a local listener) lives in the temp folder, not in `../shared-ui`.
+
+Not verified:
+
+- A real (non-dry-run) delete of a Pod, a real evict, a real drain, a real rollback, and Flux or Argo actions. Delete was verified on a Job and a CronJob only.
+- Console against a live pod (the service route was only checked for the `LOCKED` refusal and the panel for layout), and Secret reveal and edit (no Secret was read).
+- The OIDC sign-in path and any `northwind-*` cluster (not touched, by the rules).
+- The extension installed inside the OpenChamber app: Phase 3 was checked in the scratch harness and against the service directly.
+
+### Phase 4: overviews and metrics (about 2 h) - NEXT
 
 Cluster overview, workloads overview, metrics-server usage in tables and drawer, Prometheus detection and charts.
 

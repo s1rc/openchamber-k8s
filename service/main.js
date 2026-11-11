@@ -7372,6 +7372,15 @@ var appendAudit = (entry) => {
   appendFileSync(join2(dir, "audit.log"), `${JSON.stringify({ time: new Date().toISOString(), ...entry })}
 `, { mode: 384 });
 };
+var readAudit = (limit) => {
+  try {
+    const lines = readFileSync(join2(stateDir(), "audit.log"), "utf8").split(`
+`).filter(Boolean);
+    return lines.slice(-Math.max(1, limit));
+  } catch {
+    return [];
+  }
+};
 var sockDir = () => ensureDir(join2(ensureDir(stateDir()), "sock"));
 
 // src/service/proxy.ts
@@ -7498,42 +7507,15 @@ var cleanupStaleProxies = async () => {
   }
 };
 
-// src/shared/redact.ts
-var LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration";
-var base64Bytes = (value) => {
-  const clean = value.replace(/\s+/g, "");
-  const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
-  return Math.max(0, Math.floor(clean.length * 3 / 4) - padding);
-};
-var utf8Bytes = (value) => new TextEncoder().encode(value).length;
-var stripNoise = (object) => {
-  const metadata = object.metadata;
-  if (!metadata || typeof metadata !== "object" || !("managedFields" in metadata))
-    return object;
-  const { managedFields: _managedFields, ...rest } = metadata;
-  return { ...object, metadata: rest };
-};
-var redactSecret = (object, reveal = false) => {
-  if (reveal)
-    return object;
-  const out = { ...object };
-  if (out.data && typeof out.data === "object") {
-    out.data = Object.fromEntries(Object.entries(out.data).map(([key, value]) => [key, `<redacted, ${base64Bytes(String(value))} bytes>`]));
-  }
-  if (out.stringData && typeof out.stringData === "object") {
-    out.stringData = Object.fromEntries(Object.entries(out.stringData).map(([key, value]) => [key, `<redacted, ${utf8Bytes(String(value))} bytes>`]));
-  }
-  const annotations = out.metadata?.annotations;
-  if (annotations && typeof annotations === "object" && LAST_APPLIED in annotations) {
-    const { [LAST_APPLIED]: _dropped, ...rest } = annotations;
-    out.metadata = { ...out.metadata, annotations: rest };
-  }
-  return out;
-};
-var forPanel = (isSecretKind, object, reveal = false) => {
-  const stripped = stripNoise(object);
-  return isSecretKind ? redactSecret(stripped, reveal) : stripped;
-};
+// src/service/forwards.ts
+import { spawn as spawn2 } from "node:child_process";
+import { createHash as createHash3 } from "node:crypto";
+import { createServer } from "node:net";
+import { readdirSync as readdirSync2, readFileSync as readFileSync3, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join4 } from "node:path";
+
+// src/service/watch.ts
+import { createHash as createHash2 } from "node:crypto";
 
 // src/shared/format.ts
 var BYTE_UNITS = {
@@ -8004,54 +7986,46 @@ var NAV = [
   { id: "namespaces", title: "Namespaces", items: [item("Namespace")] },
   { id: "events", title: "Events", items: [item("Event")] },
   { id: "access", title: "Access control", items: ["ServiceAccount", "ClusterRole", "Role", "ClusterRoleBinding", "RoleBinding"].map(item) },
-  { id: "crds", title: "Custom resources", items: [item("CustomResourceDefinition")] }
+  { id: "crds", title: "Custom resources", items: [item("CustomResourceDefinition")] },
+  { id: "forwards", title: "Port forwarding", items: [{ kind: "PortForwards", title: "Port forwarding" }] }
 ];
 
-// node_modules/yaml/dist/index.js
-var composer = require_composer();
-var Document = require_Document();
-var Schema = require_Schema();
-var errors = require_errors();
-var Alias = require_Alias();
-var identity = require_identity();
-var Pair = require_Pair();
-var Scalar = require_Scalar();
-var YAMLMap = require_YAMLMap();
-var YAMLSeq = require_YAMLSeq();
-var cst = require_cst();
-var lexer = require_lexer();
-var lineCounter = require_line_counter();
-var parser = require_parser();
-var publicApi = require_public_api();
-var visit = require_visit();
-var $Composer = composer.Composer;
-var $Document = Document.Document;
-var $Schema = Schema.Schema;
-var $YAMLError = errors.YAMLError;
-var $YAMLParseError = errors.YAMLParseError;
-var $YAMLWarning = errors.YAMLWarning;
-var $Alias = Alias.Alias;
-var $isAlias = identity.isAlias;
-var $isCollection = identity.isCollection;
-var $isDocument = identity.isDocument;
-var $isMap = identity.isMap;
-var $isNode = identity.isNode;
-var $isPair = identity.isPair;
-var $isScalar = identity.isScalar;
-var $isSeq = identity.isSeq;
-var $Pair = Pair.Pair;
-var $Scalar = Scalar.Scalar;
-var $YAMLMap = YAMLMap.YAMLMap;
-var $YAMLSeq = YAMLSeq.YAMLSeq;
-var $Lexer = lexer.Lexer;
-var $LineCounter = lineCounter.LineCounter;
-var $Parser = parser.Parser;
-var $parse = publicApi.parse;
-var $parseAllDocuments = publicApi.parseAllDocuments;
-var $parseDocument = publicApi.parseDocument;
-var $stringify = publicApi.stringify;
-var $visit = visit.visit;
-var $visitAsync = visit.visitAsync;
+// src/shared/redact.ts
+var LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration";
+var base64Bytes = (value) => {
+  const clean = value.replace(/\s+/g, "");
+  const padding = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor(clean.length * 3 / 4) - padding);
+};
+var utf8Bytes = (value) => new TextEncoder().encode(value).length;
+var stripNoise = (object) => {
+  const metadata = object.metadata;
+  if (!metadata || typeof metadata !== "object" || !("managedFields" in metadata))
+    return object;
+  const { managedFields: _managedFields, ...rest } = metadata;
+  return { ...object, metadata: rest };
+};
+var redactSecret = (object, reveal = false) => {
+  if (reveal)
+    return object;
+  const out = { ...object };
+  if (out.data && typeof out.data === "object") {
+    out.data = Object.fromEntries(Object.entries(out.data).map(([key, value]) => [key, `<redacted, ${base64Bytes(String(value))} bytes>`]));
+  }
+  if (out.stringData && typeof out.stringData === "object") {
+    out.stringData = Object.fromEntries(Object.entries(out.stringData).map(([key, value]) => [key, `<redacted, ${utf8Bytes(String(value))} bytes>`]));
+  }
+  const annotations = out.metadata?.annotations;
+  if (annotations && typeof annotations === "object" && LAST_APPLIED in annotations) {
+    const { [LAST_APPLIED]: _dropped, ...rest } = annotations;
+    out.metadata = { ...out.metadata, annotations: rest };
+  }
+  return out;
+};
+var forPanel = (isSecretKind, object, reveal = false) => {
+  const stripped = stripNoise(object);
+  return isSecretKind ? redactSecret(stripped, reveal) : stripped;
+};
 
 // src/service/k8s.ts
 import http from "node:http";
@@ -8226,498 +8200,7 @@ var resolveKind = async (target, input, apiVersion) => {
   return found;
 };
 
-// src/service/kubeconfig.ts
-var ARN = /^arn:aws[a-z-]*:eks:([a-z0-9-]+):(\d{12}):cluster\/(.+)$/;
-var authKind = (exec) => {
-  if (!exec)
-    return "none";
-  const command = String(exec.command ?? "").split("/").pop() ?? "";
-  const first = Array.isArray(exec.args) ? String(exec.args[0] ?? "") : "";
-  if (command === "aws" || command === "aws-iam-authenticator")
-    return "aws";
-  if (first === "oidc-login" || /kubelogin/.test(command))
-    return "oidc";
-  return "other";
-};
-var profileOf = (exec) => {
-  if (!exec)
-    return null;
-  const args = Array.isArray(exec.args) ? exec.args.map(String) : [];
-  const at = args.findIndex((arg) => arg === "--profile" || arg.startsWith("--profile="));
-  if (at >= 0)
-    return args[at].includes("=") ? args[at].split("=")[1] ?? null : args[at + 1] ?? null;
-  const env = exec.env;
-  if (Array.isArray(env)) {
-    const entry = env.find((item) => item.name === "AWS_PROFILE");
-    if (entry && typeof entry.value === "string")
-      return entry.value;
-  }
-  return null;
-};
-var parseKubeconfig = (doc) => {
-  const clusters = new Map;
-  for (const entry of doc.clusters ?? [])
-    clusters.set(String(entry.name), entry.cluster ?? {});
-  const users = new Map;
-  for (const entry of doc.users ?? [])
-    users.set(String(entry.name), entry.user ?? {});
-  const contexts = [];
-  for (const entry of doc.contexts ?? []) {
-    const body = entry.context ?? {};
-    const cluster = String(body.cluster ?? "");
-    const arn = ARN.exec(cluster);
-    const exec = users.get(String(body.user ?? ""))?.exec;
-    const server = clusters.get(cluster)?.server;
-    contexts.push({
-      name: String(entry.name),
-      cluster,
-      clusterName: arn?.[3] ?? cluster,
-      server: typeof server === "string" ? server.replace(/\/+$/, "") : null,
-      namespace: typeof body.namespace === "string" && body.namespace ? body.namespace : null,
-      arn: arn ? cluster : null,
-      account: arn?.[2] ?? null,
-      region: arn?.[1] ?? null,
-      auth: authKind(exec),
-      awsProfile: profileOf(exec)
-    });
-  }
-  const current = typeof doc["current-context"] === "string" && doc["current-context"] ? doc["current-context"] : null;
-  return { current, contexts };
-};
-var cache = new Map;
-var CACHE_MS = 1e4;
-var loadKubeconfig = async (kubeconfig) => {
-  const key = kubeconfig ?? "";
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_MS)
-    return hit.value;
-  const out = await run(kubectlPath(), ["config", "view", "-o", "json", ...kubeconfigArgs(kubeconfig)], { timeoutMs: 15000 });
-  if (out.code !== 0)
-    throw fromOutput(out.stderr, "kubectl could not read your kubeconfig.");
-  let doc;
-  try {
-    doc = JSON.parse(out.stdout);
-  } catch {
-    throw new K8sError("K8S_ERROR", "kubectl answered something unreadable for your kubeconfig.");
-  }
-  const value = parseKubeconfig(doc);
-  cache.set(key, { at: Date.now(), value });
-  return value;
-};
-var contextInfo = async (name, kubeconfig) => {
-  const found = (await loadKubeconfig(kubeconfig)).contexts.find((info) => info.name === name);
-  if (!found)
-    throw new K8sError("NO_CONTEXT", `There is no cluster named "${name}" in your kubeconfig.`);
-  return found;
-};
-
-// src/service/scope.ts
-import { existsSync, readdirSync as readdirSync2, readFileSync as readFileSync3, realpathSync, statSync } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { basename, isAbsolute, join as join4, relative, resolve } from "node:path";
-var ENV_FILES = [".envrc", ".env", ".env.local", ".env.development"];
-var SKIP_DIRS = new Set(["node_modules", ".git", "vendor", "dist"]);
-var MAX_DEPTH = 4;
-var MAX_FILES = 2000;
-var MAX_FILE_BYTES = 512 * 1024;
-var clean = (value) => value.trim();
-var parseEnvFile = (text) => {
-  const out = {};
-  for (const raw of text.split(/\r?\n/)) {
-    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(raw);
-    if (!match)
-      continue;
-    let value = clean(match[2] ?? "");
-    const quote = value[0];
-    if ((quote === '"' || quote === "'") && value.lastIndexOf(quote) > 0) {
-      value = value.slice(1, value.lastIndexOf(quote));
-      if (quote === '"' && /[$`]/.test(value))
-        continue;
-    } else {
-      value = clean(value.replace(/\s+#.*$/, ""));
-      if (/[$`]/.test(value))
-        continue;
-    }
-    if (value && !(match[1] in out))
-      out[match[1]] = value;
-  }
-  return out;
-};
-var readAwsProfiles = (configPath = join4(homedir3(), ".aws", "config")) => {
-  let text = "";
-  try {
-    text = readFileSync3(configPath, "utf8");
-  } catch {
-    return {};
-  }
-  const profiles = {};
-  let current = null;
-  for (const raw of text.split(/\r?\n/)) {
-    const section = /^\s*\[(.+)\]\s*$/.exec(raw);
-    if (section) {
-      const header = section[1].trim();
-      if (header === "default")
-        current = "default";
-      else if (header.startsWith("profile "))
-        current = header.slice(8).trim();
-      else
-        current = null;
-      if (current)
-        profiles[current] = { accountId: null, region: null };
-      continue;
-    }
-    if (!current)
-      continue;
-    const pair = /^\s*([A-Za-z_]+)\s*=\s*(.+?)\s*$/.exec(raw);
-    if (!pair)
-      continue;
-    const entry = profiles[current];
-    if (pair[1] === "sso_account_id")
-      entry.accountId = pair[2];
-    if (pair[1] === "region")
-      entry.region = pair[2];
-    if (pair[1] === "role_arn" && !entry.accountId)
-      entry.accountId = /^arn:aws[a-z-]*:iam::(\d{12}):/.exec(pair[2])?.[1] ?? null;
-  }
-  return profiles;
-};
-var emptyTier = (label) => ({ context: null, namespace: null, candidates: [], reasons: [], confidence: 0, label });
-var findContext = (contexts, vote) => {
-  if (vote.by === "name")
-    return contexts.find((info) => info.name === vote.value);
-  if (vote.by === "cluster")
-    return contexts.find((info) => info.clusterName === vote.value || info.name === vote.value || info.cluster.endsWith(`/${vote.value}`));
-  const server = vote.value.replace(/\/+$/, "");
-  return contexts.find((info) => info.server === server);
-};
-var tally = (votes) => {
-  const scores = new Map;
-  for (const vote of votes) {
-    const entry = scores.get(vote.value) ?? { score: 0, reasons: [] };
-    entry.score += vote.weight;
-    if (!entry.reasons.includes(vote.reason))
-      entry.reasons.push(vote.reason);
-    scores.set(vote.value, entry);
-  }
-  let top = 0;
-  for (const entry of scores.values())
-    top = Math.max(top, entry.score);
-  const winners = [...scores.entries()].filter(([, entry]) => entry.score === top);
-  if (winners.length === 0)
-    return { best: null, tied: [], score: 0, reasons: [] };
-  if (winners.length > 1)
-    return { best: null, tied: winners.map(([value]) => value), score: top, reasons: winners.flatMap(([, entry]) => entry.reasons) };
-  return { best: winners[0][0], tied: [], score: top, reasons: winners[0][1].reasons };
-};
-var confidenceOf = (score) => Math.min(0.95, Math.max(0.3, score / 100));
-var pathIsInside = (child, parent) => {
-  const rel = relative(parent, child);
-  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
-};
-var expandHome = (value, home) => value === "~" ? home : value.startsWith("~/") ? join4(home, value.slice(2)) : value;
-var envTier = async (dir, deps) => {
-  const tier = emptyTier("From env file");
-  const env = {};
-  for (const file of ENV_FILES) {
-    let text;
-    try {
-      text = readFileSync3(join4(dir, file), "utf8");
-    } catch {
-      continue;
-    }
-    for (const [key, value] of Object.entries(parseEnvFile(text)))
-      if (!(key in env))
-        env[key] = { value, file };
-  }
-  const pick = (...keys) => {
-    for (const key of keys)
-      if (env[key])
-        return { ...env[key], key };
-    return null;
-  };
-  const home = deps.home ?? homedir3();
-  const kube = pick("KUBECONFIG");
-  if (kube) {
-    const path = resolve(dir, expandHome(kube.value, home));
-    let real = null;
-    try {
-      real = statSync(path).isFile() ? realpathSync(path) : null;
-    } catch {
-      real = null;
-    }
-    if (!real)
-      tier.reasons.push(`${kube.key} in ${kube.file} names a file that does not exist`);
-    else if (pathIsInside(real, realpathSync(dir)))
-      tier.reasons.push(`${kube.key} in ${kube.file} points inside the repo, so it is not used: a kubeconfig can run programs`);
-    else {
-      tier.kubeconfig = real;
-      tier.reasons.push(`kubeconfig ${basename(real)} from ${kube.key} in ${kube.file}`);
-    }
-  }
-  const contexts = await deps.loadContexts(tier.kubeconfig);
-  const ns = pick("NAMESPACE", "KUBE_NAMESPACE", "K8S_NAMESPACE");
-  if (ns) {
-    tier.namespace = ns.value;
-    tier.reasons.push(`namespace ${ns.value} from ${ns.key} in ${ns.file}`);
-    tier.label = `From ${ns.file}`;
-  }
-  const named = pick("KUBECONTEXT", "KUBE_CONTEXT", "K8S_CONTEXT");
-  if (named) {
-    if (contexts.some((info) => info.name === named.value)) {
-      tier.context = named.value;
-      tier.confidence = 0.95;
-      tier.reasons.push(`context ${named.value} from ${named.key} in ${named.file}`);
-      tier.label = `From ${named.file}`;
-    } else
-      tier.reasons.push(`${named.key} in ${named.file} names "${named.value}", which is not in the kubeconfig`);
-    return tier;
-  }
-  const profileEnv = pick("AWS_PROFILE");
-  if (profileEnv) {
-    const profile = deps.awsProfiles()[profileEnv.value];
-    if (!profile?.accountId)
-      tier.reasons.push(`AWS profile ${profileEnv.value} in ${profileEnv.file} has no account id to match`);
-    else {
-      let matches = contexts.filter((info) => info.account === profile.accountId);
-      const sameRegion = matches.filter((info) => info.region === profile.region);
-      if (matches.length > 1 && sameRegion.length > 0)
-        matches = sameRegion;
-      if (matches.length === 1) {
-        tier.context = matches[0].name;
-        tier.confidence = 0.8;
-        tier.reasons.push(`AWS profile ${profileEnv.value} (account ${profile.accountId}) from ${profileEnv.file} matches ${matches[0].name}`);
-        tier.label = `From ${profileEnv.file}`;
-      } else if (matches.length > 1) {
-        tier.candidates = matches.map((info) => info.name);
-        tier.confidence = 0.4;
-        tier.reasons.push(`AWS profile ${profileEnv.value} (account ${profile.accountId}) from ${profileEnv.file} fits ${matches.length} clusters: pick one`);
-        tier.label = `From ${profileEnv.file}`;
-      } else
-        tier.reasons.push(`AWS profile ${profileEnv.value} (account ${profile.accountId}) matches no cluster in the kubeconfig`);
-    }
-  }
-  return tier;
-};
-var listFiles = (root) => {
-  const out = [];
-  const queue = [{ dir: root, depth: 0 }];
-  while (queue.length > 0 && out.length < MAX_FILES) {
-    const { dir, depth } = queue.shift();
-    let entries;
-    try {
-      entries = readdirSync2(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      if (out.length >= MAX_FILES)
-        break;
-      if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name) && depth < MAX_DEPTH)
-          queue.push({ dir: join4(dir, entry.name), depth: depth + 1 });
-      } else if (entry.isFile())
-        out.push(join4(dir, entry.name));
-    }
-  }
-  return out;
-};
-var readSmall = (file) => {
-  try {
-    if (statSync(file).size > MAX_FILE_BYTES)
-      return null;
-    return readFileSync3(file, "utf8");
-  } catch {
-    return null;
-  }
-};
-var blockAfter = (text, at) => text.slice(at, at + 2500);
-var terraformVotes = (text, file, ctx) => {
-  const headers = [
-    [/resource\s+"aws_eks_cluster"\s+"[^"]+"\s*\{/g, /^\s*name\s*=\s*"([^"$]+)"/m],
-    [/data\s+"aws_eks_cluster"\s+"[^"]+"\s*\{/g, /^\s*name\s*=\s*"([^"$]+)"/m],
-    [/module\s+"eks[^"]*"\s*\{/g, /^\s*cluster_name\s*=\s*"([^"$]+)"/m]
-  ];
-  for (const [header, field] of headers) {
-    for (const match of text.matchAll(header)) {
-      const name = field.exec(blockAfter(text, (match.index ?? 0) + match[0].length))?.[1];
-      if (name)
-        ctx.push({ by: "cluster", value: name, weight: 40, reason: `cluster ${name} from ${file}` });
-    }
-  }
-};
-var isK8sDoc = (doc) => typeof doc.apiVersion === "string" && typeof doc.kind === "string";
-var repoTier = async (dir, contexts) => {
-  const tier = emptyTier("From repo files");
-  const ctxVotes = [];
-  const nsVotes = [];
-  const plain = new Map;
-  let release;
-  for (const path of listFiles(dir)) {
-    const file = relative(dir, path);
-    const name = basename(path);
-    const lower = name.toLowerCase();
-    const isYaml = lower.endsWith(".yaml") || lower.endsWith(".yml");
-    if (!isYaml && !lower.endsWith(".tf") && name !== "Tiltfile")
-      continue;
-    const text = readSmall(path);
-    if (text === null)
-      continue;
-    if (lower.endsWith(".tf")) {
-      terraformVotes(text, file, ctxVotes);
-      continue;
-    }
-    if (name === "Tiltfile") {
-      for (const match of text.matchAll(/allow_k8s_contexts\(\s*(\[[^\]]*\]|["'][^"']+["'])\s*\)/g)) {
-        for (const item of match[1].matchAll(/["']([^"']+)["']/g))
-          ctxVotes.push({ by: "name", value: item[1], weight: 70, reason: `context ${item[1]} from ${file}` });
-      }
-      continue;
-    }
-    for (const parsed of $parseAllDocuments(text, { prettyErrors: false })) {
-      if (parsed.errors.length > 0)
-        continue;
-      const doc = parsed.toJS({ maxAliasCount: 100 });
-      if (!doc || typeof doc !== "object" || Array.isArray(doc))
-        continue;
-      const item = doc;
-      if (name === "Chart.yaml" && typeof item.name === "string") {
-        release ??= item.name;
-        continue;
-      }
-      if (typeof item.apiVersion === "string" && item.apiVersion.startsWith("skaffold/")) {
-        const kc = item.deploy?.kubeContext;
-        if (typeof kc === "string")
-          ctxVotes.push({ by: "name", value: kc, weight: 70, reason: `context ${kc} from ${file}` });
-        continue;
-      }
-      if (!isK8sDoc(item) && !(lower === "kustomization.yaml" || lower === "kustomization.yml"))
-        continue;
-      const apiVersion = String(item.apiVersion ?? "");
-      const kind = String(item.kind ?? "");
-      const spec = item.spec ?? {};
-      const metaNs = item.metadata?.namespace;
-      if (apiVersion.startsWith("argoproj.io/") && (kind === "Application" || kind === "ApplicationSet")) {
-        const destination = (kind === "Application" ? spec.destination : spec.template?.spec?.destination) ?? {};
-        if (typeof destination.namespace === "string" && !destination.namespace.includes("{"))
-          nsVotes.push({ value: destination.namespace, weight: 60, reason: `namespace ${destination.namespace} from ${file}` });
-        if (typeof destination.name === "string" && destination.name !== "in-cluster" && !destination.name.includes("{"))
-          ctxVotes.push({ by: "cluster", value: destination.name, weight: 60, reason: `cluster ${destination.name} from ${file}` });
-        if (typeof destination.server === "string" && !/kubernetes\.default\.svc/.test(destination.server))
-          ctxVotes.push({ by: "server", value: destination.server, weight: 60, reason: `cluster ${destination.server} from ${file}` });
-        continue;
-      }
-      if (apiVersion.startsWith("kustomize.toolkit.fluxcd.io/") || apiVersion.startsWith("helm.toolkit.fluxcd.io/")) {
-        if (typeof spec.targetNamespace === "string")
-          nsVotes.push({ value: spec.targetNamespace, weight: 50, reason: `namespace ${spec.targetNamespace} from ${file}` });
-        else if (typeof metaNs === "string")
-          nsVotes.push({ value: metaNs, weight: 50, reason: `namespace ${metaNs} from ${file}` });
-        continue;
-      }
-      if (lower === "kustomization.yaml" || lower === "kustomization.yml") {
-        if (typeof item.namespace === "string")
-          nsVotes.push({ value: item.namespace, weight: 40, reason: `namespace ${item.namespace} from ${file}` });
-        continue;
-      }
-      if (typeof metaNs === "string" && kind !== "Namespace")
-        plain.set(metaNs, (plain.get(metaNs) ?? 0) + 1);
-    }
-  }
-  const resolved = [];
-  const named = new Map;
-  for (const vote of ctxVotes) {
-    const found = findContext(contexts, vote);
-    if (found) {
-      named.set(found.name, found);
-      resolved.push({ ...vote, value: found.name });
-    }
-  }
-  const ctx = tally(resolved);
-  if (ctx.best) {
-    tier.context = ctx.best;
-    tier.confidence = confidenceOf(ctx.score);
-    tier.reasons.push(...ctx.reasons);
-  } else if (ctx.tied.length > 1) {
-    tier.candidates = ctx.tied;
-    tier.confidence = 0.3;
-    tier.reasons.push(`${ctx.tied.length} clusters fit equally well: pick one`, ...ctx.reasons);
-  }
-  for (const [value, count] of plain)
-    nsVotes.push({ value, weight: Math.min(count, 10) * 2, reason: `namespace ${value} in ${count} manifest${count === 1 ? "" : "s"}` });
-  const ns = tally(nsVotes);
-  if (ns.best) {
-    tier.namespace = ns.best;
-    tier.confidence = Math.max(tier.confidence, confidenceOf(ns.score));
-    tier.reasons.push(...ns.reasons);
-  } else if (ns.tied.length > 1)
-    tier.reasons.push(`namespaces ${ns.tied.join(", ")} fit equally well, none preselected`);
-  if (release)
-    tier.releaseHint = release;
-  return tier;
-};
-var resolveScope = async (directory, deps) => {
-  const dir = resolve(directory);
-  const pick = deps.picks[dir];
-  const defaults = await deps.loadContexts();
-  if (pick && defaults.some((info) => info.name === pick.context)) {
-    const env = await envTier(dir, deps).catch(() => emptyTier(""));
-    return {
-      context: pick.context,
-      namespace: pick.namespace,
-      source: "Your pick",
-      sourceKind: "pick",
-      confidence: 1,
-      reasons: [`You picked ${pick.context}${pick.namespace ? ` and ${pick.namespace}` : ""} for this project`],
-      candidates: [],
-      ...env.kubeconfig ? { kubeconfig: env.kubeconfig } : {}
-    };
-  }
-  const env = await envTier(dir, deps);
-  const repo = await repoTier(dir, env.kubeconfig ? await deps.loadContexts(env.kubeconfig) : defaults);
-  const contextTier = env.context !== null || env.candidates.length > 0 ? env : repo;
-  const namespaceTier = env.namespace !== null ? env : repo;
-  const context = contextTier.context;
-  const namespace = namespaceTier.namespace;
-  const candidates = context ? [] : contextTier.candidates;
-  if (!context && candidates.length === 0 && !namespace)
-    return null;
-  const primary = context || candidates.length > 0 ? contextTier : namespaceTier;
-  const usesRepo = contextTier === repo || namespaceTier === repo;
-  return {
-    context,
-    namespace,
-    source: primary.label,
-    sourceKind: primary === env ? "env" : "repo",
-    confidence: Math.max(primary.confidence, 0.3),
-    reasons: [...new Set([...env.reasons, ...usesRepo ? repo.reasons : []])],
-    candidates,
-    ...env.kubeconfig ? { kubeconfig: env.kubeconfig } : {},
-    ...repo.releaseHint ? { releaseHint: repo.releaseHint } : {}
-  };
-};
-var createScopeCache = (resolveFn, ttlMs = 5 * 60 * 1000, now = Date.now) => {
-  const entries = new Map;
-  return {
-    get: async (dir) => {
-      const key = resolve(dir);
-      const hit = entries.get(key);
-      if (hit && now() - hit.at < ttlMs)
-        return hit.value;
-      const value = await resolveFn(key);
-      entries.set(key, { at: now(), value });
-      return value;
-    },
-    invalidate: (dir) => {
-      if (dir)
-        entries.delete(resolve(dir));
-      else
-        entries.clear();
-    }
-  };
-};
-
 // src/service/watch.ts
-import { createHash as createHash2 } from "node:crypto";
 var BATCH_MS = 250;
 var LEASE_MS = 60000;
 var SWEEP_MS = 15000;
@@ -8981,20 +8464,993 @@ var closeAllWatches = () => {
     closeWatch(w);
 };
 
+// src/service/forwards.ts
+var MAX_RESTARTS = 3;
+var RESTART_MS = 1000;
+var START_MS2 = 15000;
+var FILE = "forwards.json";
+var forwards = new Map;
+var publicView = (forward) => ({
+  id: forward.id,
+  context: forward.context,
+  namespace: forward.namespace,
+  kind: forward.kind,
+  name: forward.name,
+  localPort: forward.localPort,
+  remotePort: forward.remotePort,
+  status: forward.status,
+  restarts: forward.restarts,
+  ...forward.error ? { error: forward.error } : {},
+  url: `http://localhost:${forward.localPort}`
+});
+var listForwards = () => [...forwards.values()].map(publicView);
+var announce = () => publish("forwards", { forwards: listForwards() });
+var configs = () => [...forwards.values()].map((forward) => ({
+  id: forward.id,
+  context: forward.context,
+  ...forward.kubeconfig ? { kubeconfig: forward.kubeconfig } : {},
+  namespace: forward.namespace,
+  kind: forward.kind,
+  name: forward.name,
+  localPort: forward.localPort,
+  remotePort: forward.remotePort
+}));
+var save = () => {
+  try {
+    writeJson(FILE, configs());
+  } catch {}
+};
+var freePort = () => new Promise((resolve, reject) => {
+  const server = createServer();
+  server.unref();
+  server.on("error", reject);
+  server.listen(0, "127.0.0.1", () => {
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+    server.close(() => port ? resolve(port) : reject(new Error("No free local port.")));
+  });
+});
+var schedule2 = (forward) => {
+  if (forward.stopping || forward.retryTimer)
+    return;
+  if (forward.restarts >= MAX_RESTARTS) {
+    forward.status = "failed";
+    forward.error = `The forward stopped ${MAX_RESTARTS + 1} times. Check that the pod or service is running.`;
+    announce();
+    save();
+    return;
+  }
+  forward.restarts += 1;
+  forward.retryTimer = setTimeout(() => {
+    forward.retryTimer = null;
+    start(forward);
+  }, RESTART_MS);
+};
+var start = (forward) => {
+  if (forward.stopping)
+    return;
+  const args = ["--context", forward.context, ...kubeconfigArgs(forward.kubeconfig), "-n", forward.namespace, "port-forward", `${forward.kind}/${forward.name}`, `${forward.localPort}:${forward.remotePort}`, "--address", "127.0.0.1"];
+  const child = spawn2(kubectlPath(), args, { env: childEnv(), stdio: ["ignore", "pipe", "pipe"] });
+  forward.child = child;
+  forward.status = "starting";
+  forward.error = undefined;
+  forward.ready = false;
+  let output = "";
+  if (child.pid) {
+    try {
+      writeFileSync3(forward.pidFile, String(child.pid), { mode: 384 });
+    } catch {}
+  }
+  const timer = setTimeout(() => {
+    if (!forward.ready && !forward.stopping) {
+      forward.error = "kubectl did not open the forward in time.";
+      child.kill("SIGTERM");
+    }
+  }, START_MS2);
+  timer.unref();
+  const onData = (chunk) => {
+    output = (output + String(chunk)).slice(-2000);
+    if (!forward.ready && /Forwarding from/.test(output)) {
+      forward.ready = true;
+      forward.status = "live";
+      forward.error = undefined;
+      clearTimeout(timer);
+      announce();
+      save();
+    }
+  };
+  child.stdout?.on("data", onData);
+  child.stderr?.on("data", onData);
+  child.on("error", (error) => {
+    clearTimeout(timer);
+    forward.error = clip(error.message);
+    forward.child = null;
+    schedule2(forward);
+  });
+  child.on("exit", () => {
+    clearTimeout(timer);
+    const wasReady = forward.ready;
+    forward.child = null;
+    rmSync2(forward.pidFile, { force: true });
+    if (forward.stopping)
+      return;
+    forward.status = "starting";
+    forward.error = wasReady ? "The forward stopped. It is starting again." : fromOutput(output, "The forward did not start.", forward.context).message;
+    schedule2(forward);
+    announce();
+  });
+  announce();
+};
+var createForward = async (input) => {
+  const localPort = input.localPort && input.localPort > 0 ? input.localPort : await freePort();
+  const taken = [...forwards.values()].some((forward) => forward.localPort === localPort && forward.status !== "stopped" && forward.status !== "failed");
+  if (taken)
+    throw new K8sError("BAD_REQUEST", `Local port ${localPort} is already used by another forward.`);
+  const id = `f_${createHash3("sha1").update(`${input.context}|${input.namespace}|${input.kind}/${input.name}|${localPort}|${Date.now()}`).digest("hex").slice(0, 10)}`;
+  const forward = {
+    id,
+    context: input.context,
+    ...input.kubeconfig ? { kubeconfig: input.kubeconfig } : {},
+    namespace: input.namespace,
+    kind: input.kind,
+    name: input.name,
+    localPort,
+    remotePort: input.remotePort,
+    status: "starting",
+    restarts: 0,
+    child: null,
+    ready: false,
+    stopping: false,
+    retryTimer: null,
+    pidFile: join4(sockDir(), `fwd-${id}.pid`)
+  };
+  forwards.set(id, forward);
+  start(forward);
+  save();
+  return publicView(forward);
+};
+var stopForward = (id) => {
+  const forward = forwards.get(id);
+  if (!forward)
+    return;
+  forward.stopping = true;
+  forward.status = "stopped";
+  if (forward.retryTimer)
+    clearTimeout(forward.retryTimer);
+  forward.retryTimer = null;
+  forward.child?.kill("SIGTERM");
+  forward.child = null;
+  rmSync2(forward.pidFile, { force: true });
+  forwards.delete(id);
+  save();
+  announce();
+};
+var shutdownForwards = () => {
+  for (const forward of forwards.values()) {
+    forward.stopping = true;
+    if (forward.retryTimer)
+      clearTimeout(forward.retryTimer);
+    forward.retryTimer = null;
+    forward.child?.kill("SIGTERM");
+    forward.child = null;
+    rmSync2(forward.pidFile, { force: true });
+  }
+};
+var killStale = async () => {
+  const dir = sockDir();
+  for (const name of readdirSync2(dir)) {
+    if (!name.startsWith("fwd-") || !name.endsWith(".pid"))
+      continue;
+    const file = join4(dir, name);
+    const pid = Number(readFileSync3(file, "utf8").trim());
+    if (Number.isInteger(pid) && pid > 1) {
+      const out = await run("/bin/ps", ["-p", String(pid), "-o", "command="], { timeoutMs: 5000 });
+      if (/kubectl/.test(out.stdout) && /port-forward/.test(out.stdout)) {
+        try {
+          process.kill(pid, "SIGTERM");
+        } catch {}
+      }
+    }
+    rmSync2(file, { force: true });
+  }
+};
+var restoreForwards = async () => {
+  await killStale().catch(() => {
+    return;
+  });
+  const saved = readJson(FILE, []);
+  if (!Array.isArray(saved))
+    return;
+  for (const config of saved) {
+    if (!config || typeof config.id !== "string" || typeof config.name !== "string")
+      continue;
+    forwards.set(config.id, {
+      ...config,
+      status: "starting",
+      restarts: 0,
+      child: null,
+      ready: false,
+      stopping: false,
+      retryTimer: null,
+      pidFile: join4(sockDir(), `fwd-${config.id}.pid`)
+    });
+  }
+  for (const forward of forwards.values())
+    start(forward);
+};
+
+// src/shared/ops.ts
+var arr2 = (value) => Array.isArray(value) ? value : [];
+var text2 = (value) => value === undefined || value === null ? "" : String(value);
+var manualJobFor = (cronJob, now) => {
+  const template = cronJob.spec?.jobTemplate ?? {};
+  const name = text2(cronJob.metadata?.name);
+  const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "-");
+  return {
+    ...template,
+    apiVersion: "batch/v1",
+    kind: "Job",
+    metadata: {
+      ...template.metadata ?? {},
+      name: `${name}-manual-${stamp}`,
+      namespace: text2(cronJob.metadata?.namespace),
+      annotations: { ...template.metadata?.annotations ?? {}, "cronjob.kubernetes.io/instantiate": "manual" },
+      ownerReferences: [
+        {
+          apiVersion: "batch/v1",
+          kind: "CronJob",
+          name,
+          uid: text2(cronJob.metadata?.uid),
+          controller: true,
+          blockOwnerDeletion: true
+        }
+      ]
+    }
+  };
+};
+var replicaSetRevision = (replicaSet) => {
+  const raw = Number(replicaSet.metadata?.annotations?.["deployment.kubernetes.io/revision"]);
+  return Number.isInteger(raw) ? raw : null;
+};
+var deploymentRevisions = (deployment, replicaSets) => {
+  const uid = text2(deployment.metadata?.uid);
+  return replicaSets.filter((rs) => arr2(rs.metadata?.ownerReferences).some((owner) => owner.kind === "Deployment" && (text2(owner.uid) === uid || text2(owner.name) === text2(deployment.metadata?.name)))).map((rs) => ({ revision: replicaSetRevision(rs), name: text2(rs.metadata?.name), template: rs.spec?.template ?? null, created: rs.metadata?.creationTimestamp ?? null })).filter((entry) => entry.revision !== null).sort((a, b) => b.revision - a.revision);
+};
+var statefulSetRevisions = (statefulSet, revisions) => {
+  const uid = text2(statefulSet.metadata?.uid);
+  return revisions.filter((cr) => arr2(cr.metadata?.ownerReferences).some((owner) => owner.kind === "StatefulSet" && (text2(owner.uid) === uid || text2(owner.name) === text2(statefulSet.metadata?.name)))).map((cr) => ({ revision: Number.isInteger(cr.revision) ? cr.revision : null, name: text2(cr.metadata?.name), template: cr.data?.raw ?? null, created: cr.metadata?.creationTimestamp ?? null })).filter((entry) => entry.revision !== null && entry.template !== null).sort((a, b) => b.revision - a.revision);
+};
+var currentRevision = (object) => {
+  const raw = Number(object.metadata?.annotations?.["deployment.kubernetes.io/revision"]);
+  return Number.isInteger(raw) ? raw : null;
+};
+var drainIssue = (pod) => {
+  if (pod.metadata?.annotations?.["kubernetes.io/config.mirror"])
+    return "A static pod; it cannot be evicted.";
+  const owners = arr2(pod.metadata?.ownerReferences);
+  if (owners.length === 0)
+    return "No controller owns it; drain would delete it.";
+  if (owners.some((owner) => owner.kind === "DaemonSet"))
+    return null;
+  return null;
+};
+var drainKind = (pod) => {
+  const owners = arr2(pod.metadata?.ownerReferences);
+  const owner = owners.find((entry) => entry.controller) ?? owners[0];
+  return owner ? `${text2(owner.kind)}/${text2(owner.name)}` : "No controller";
+};
+var fluxPatch = (action, now) => {
+  if (action === "reconcile")
+    return { metadata: { annotations: { "reconcile.fluxcd.io/requestedAt": now.toISOString() } } };
+  return { spec: { suspend: action === "suspend" } };
+};
+var argoPatch = (action, revision) => {
+  if (action === "refresh")
+    return { metadata: { annotations: { "argocd.argoproj.io/refresh": "normal" } } };
+  return { operation: { sync: revision ? { revision } : {} } };
+};
+var parseAuditLine = (line) => {
+  try {
+    const value = JSON.parse(line);
+    if (typeof value.time !== "string" || typeof value.context !== "string" || typeof value.verb !== "string" || typeof value.target !== "string")
+      return null;
+    return {
+      time: value.time,
+      project: typeof value.project === "string" ? value.project : null,
+      context: value.context,
+      verb: value.verb,
+      target: value.target,
+      source: value.source === "agent" ? "agent" : "panel"
+    };
+  } catch {
+    return null;
+  }
+};
+
+// node_modules/yaml/dist/index.js
+var composer = require_composer();
+var Document = require_Document();
+var Schema = require_Schema();
+var errors = require_errors();
+var Alias = require_Alias();
+var identity = require_identity();
+var Pair = require_Pair();
+var Scalar = require_Scalar();
+var YAMLMap = require_YAMLMap();
+var YAMLSeq = require_YAMLSeq();
+var cst = require_cst();
+var lexer = require_lexer();
+var lineCounter = require_line_counter();
+var parser = require_parser();
+var publicApi = require_public_api();
+var visit = require_visit();
+var $Composer = composer.Composer;
+var $Document = Document.Document;
+var $Schema = Schema.Schema;
+var $YAMLError = errors.YAMLError;
+var $YAMLParseError = errors.YAMLParseError;
+var $YAMLWarning = errors.YAMLWarning;
+var $Alias = Alias.Alias;
+var $isAlias = identity.isAlias;
+var $isCollection = identity.isCollection;
+var $isDocument = identity.isDocument;
+var $isMap = identity.isMap;
+var $isNode = identity.isNode;
+var $isPair = identity.isPair;
+var $isScalar = identity.isScalar;
+var $isSeq = identity.isSeq;
+var $Pair = Pair.Pair;
+var $Scalar = Scalar.Scalar;
+var $YAMLMap = YAMLMap.YAMLMap;
+var $YAMLSeq = YAMLSeq.YAMLSeq;
+var $Lexer = lexer.Lexer;
+var $LineCounter = lineCounter.LineCounter;
+var $Parser = parser.Parser;
+var $parse = publicApi.parse;
+var $parseAllDocuments = publicApi.parseAllDocuments;
+var $parseDocument = publicApi.parseDocument;
+var $stringify = publicApi.stringify;
+var $visit = visit.visit;
+var $visitAsync = visit.visitAsync;
+
+// src/service/kubeconfig.ts
+var ARN = /^arn:aws[a-z-]*:eks:([a-z0-9-]+):(\d{12}):cluster\/(.+)$/;
+var authKind = (exec) => {
+  if (!exec)
+    return "none";
+  const command = String(exec.command ?? "").split("/").pop() ?? "";
+  const first = Array.isArray(exec.args) ? String(exec.args[0] ?? "") : "";
+  if (command === "aws" || command === "aws-iam-authenticator")
+    return "aws";
+  if (first === "oidc-login" || /kubelogin/.test(command))
+    return "oidc";
+  return "other";
+};
+var profileOf = (exec) => {
+  if (!exec)
+    return null;
+  const args = Array.isArray(exec.args) ? exec.args.map(String) : [];
+  const at = args.findIndex((arg) => arg === "--profile" || arg.startsWith("--profile="));
+  if (at >= 0)
+    return args[at].includes("=") ? args[at].split("=")[1] ?? null : args[at + 1] ?? null;
+  const env = exec.env;
+  if (Array.isArray(env)) {
+    const entry = env.find((item) => item.name === "AWS_PROFILE");
+    if (entry && typeof entry.value === "string")
+      return entry.value;
+  }
+  return null;
+};
+var parseKubeconfig = (doc) => {
+  const clusters = new Map;
+  for (const entry of doc.clusters ?? [])
+    clusters.set(String(entry.name), entry.cluster ?? {});
+  const users = new Map;
+  for (const entry of doc.users ?? [])
+    users.set(String(entry.name), entry.user ?? {});
+  const contexts = [];
+  for (const entry of doc.contexts ?? []) {
+    const body = entry.context ?? {};
+    const cluster = String(body.cluster ?? "");
+    const arn = ARN.exec(cluster);
+    const exec = users.get(String(body.user ?? ""))?.exec;
+    const server = clusters.get(cluster)?.server;
+    contexts.push({
+      name: String(entry.name),
+      cluster,
+      clusterName: arn?.[3] ?? cluster,
+      server: typeof server === "string" ? server.replace(/\/+$/, "") : null,
+      namespace: typeof body.namespace === "string" && body.namespace ? body.namespace : null,
+      arn: arn ? cluster : null,
+      account: arn?.[2] ?? null,
+      region: arn?.[1] ?? null,
+      auth: authKind(exec),
+      awsProfile: profileOf(exec)
+    });
+  }
+  const current = typeof doc["current-context"] === "string" && doc["current-context"] ? doc["current-context"] : null;
+  return { current, contexts };
+};
+var cache = new Map;
+var CACHE_MS = 1e4;
+var loadKubeconfig = async (kubeconfig) => {
+  const key = kubeconfig ?? "";
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < CACHE_MS)
+    return hit.value;
+  const out = await run(kubectlPath(), ["config", "view", "-o", "json", ...kubeconfigArgs(kubeconfig)], { timeoutMs: 15000 });
+  if (out.code !== 0)
+    throw fromOutput(out.stderr, "kubectl could not read your kubeconfig.");
+  let doc;
+  try {
+    doc = JSON.parse(out.stdout);
+  } catch {
+    throw new K8sError("K8S_ERROR", "kubectl answered something unreadable for your kubeconfig.");
+  }
+  const value = parseKubeconfig(doc);
+  cache.set(key, { at: Date.now(), value });
+  return value;
+};
+var contextInfo = async (name, kubeconfig) => {
+  const found = (await loadKubeconfig(kubeconfig)).contexts.find((info) => info.name === name);
+  if (!found)
+    throw new K8sError("NO_CONTEXT", `There is no cluster named "${name}" in your kubeconfig.`);
+  return found;
+};
+
+// src/service/scope.ts
+import { existsSync, readdirSync as readdirSync3, readFileSync as readFileSync4, realpathSync, statSync } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { basename, isAbsolute, join as join5, relative, resolve } from "node:path";
+var ENV_FILES = [".envrc", ".env", ".env.local", ".env.development"];
+var SKIP_DIRS = new Set(["node_modules", ".git", "vendor", "dist"]);
+var MAX_DEPTH = 4;
+var MAX_FILES = 2000;
+var MAX_FILE_BYTES = 512 * 1024;
+var clean = (value) => value.trim();
+var parseEnvFile = (text) => {
+  const out = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(raw);
+    if (!match)
+      continue;
+    let value = clean(match[2] ?? "");
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && value.lastIndexOf(quote) > 0) {
+      value = value.slice(1, value.lastIndexOf(quote));
+      if (quote === '"' && /[$`]/.test(value))
+        continue;
+    } else {
+      value = clean(value.replace(/\s+#.*$/, ""));
+      if (/[$`]/.test(value))
+        continue;
+    }
+    if (value && !(match[1] in out))
+      out[match[1]] = value;
+  }
+  return out;
+};
+var readAwsProfiles = (configPath = join5(homedir3(), ".aws", "config")) => {
+  let text = "";
+  try {
+    text = readFileSync4(configPath, "utf8");
+  } catch {
+    return {};
+  }
+  const profiles = {};
+  let current = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const section = /^\s*\[(.+)\]\s*$/.exec(raw);
+    if (section) {
+      const header = section[1].trim();
+      if (header === "default")
+        current = "default";
+      else if (header.startsWith("profile "))
+        current = header.slice(8).trim();
+      else
+        current = null;
+      if (current)
+        profiles[current] = { accountId: null, region: null };
+      continue;
+    }
+    if (!current)
+      continue;
+    const pair = /^\s*([A-Za-z_]+)\s*=\s*(.+?)\s*$/.exec(raw);
+    if (!pair)
+      continue;
+    const entry = profiles[current];
+    if (pair[1] === "sso_account_id")
+      entry.accountId = pair[2];
+    if (pair[1] === "region")
+      entry.region = pair[2];
+    if (pair[1] === "role_arn" && !entry.accountId)
+      entry.accountId = /^arn:aws[a-z-]*:iam::(\d{12}):/.exec(pair[2])?.[1] ?? null;
+  }
+  return profiles;
+};
+var emptyTier = (label) => ({ context: null, namespace: null, candidates: [], reasons: [], confidence: 0, label });
+var findContext = (contexts, vote) => {
+  if (vote.by === "name")
+    return contexts.find((info) => info.name === vote.value);
+  if (vote.by === "cluster")
+    return contexts.find((info) => info.clusterName === vote.value || info.name === vote.value || info.cluster.endsWith(`/${vote.value}`));
+  const server = vote.value.replace(/\/+$/, "");
+  return contexts.find((info) => info.server === server);
+};
+var tally = (votes) => {
+  const scores = new Map;
+  for (const vote of votes) {
+    const entry = scores.get(vote.value) ?? { score: 0, reasons: [] };
+    entry.score += vote.weight;
+    if (!entry.reasons.includes(vote.reason))
+      entry.reasons.push(vote.reason);
+    scores.set(vote.value, entry);
+  }
+  let top = 0;
+  for (const entry of scores.values())
+    top = Math.max(top, entry.score);
+  const winners = [...scores.entries()].filter(([, entry]) => entry.score === top);
+  if (winners.length === 0)
+    return { best: null, tied: [], score: 0, reasons: [] };
+  if (winners.length > 1)
+    return { best: null, tied: winners.map(([value]) => value), score: top, reasons: winners.flatMap(([, entry]) => entry.reasons) };
+  return { best: winners[0][0], tied: [], score: top, reasons: winners[0][1].reasons };
+};
+var confidenceOf = (score) => Math.min(0.95, Math.max(0.3, score / 100));
+var pathIsInside = (child, parent) => {
+  const rel = relative(parent, child);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
+};
+var expandHome = (value, home) => value === "~" ? home : value.startsWith("~/") ? join5(home, value.slice(2)) : value;
+var envTier = async (dir, deps) => {
+  const tier = emptyTier("From env file");
+  const env = {};
+  for (const file of ENV_FILES) {
+    let text;
+    try {
+      text = readFileSync4(join5(dir, file), "utf8");
+    } catch {
+      continue;
+    }
+    for (const [key, value] of Object.entries(parseEnvFile(text)))
+      if (!(key in env))
+        env[key] = { value, file };
+  }
+  const pick = (...keys) => {
+    for (const key of keys)
+      if (env[key])
+        return { ...env[key], key };
+    return null;
+  };
+  const home = deps.home ?? homedir3();
+  const kube = pick("KUBECONFIG");
+  if (kube) {
+    const path = resolve(dir, expandHome(kube.value, home));
+    let real = null;
+    try {
+      real = statSync(path).isFile() ? realpathSync(path) : null;
+    } catch {
+      real = null;
+    }
+    if (!real)
+      tier.reasons.push(`${kube.key} in ${kube.file} names a file that does not exist`);
+    else if (pathIsInside(real, realpathSync(dir)))
+      tier.reasons.push(`${kube.key} in ${kube.file} points inside the repo, so it is not used: a kubeconfig can run programs`);
+    else {
+      tier.kubeconfig = real;
+      tier.reasons.push(`kubeconfig ${basename(real)} from ${kube.key} in ${kube.file}`);
+    }
+  }
+  const contexts = await deps.loadContexts(tier.kubeconfig);
+  const ns = pick("NAMESPACE", "KUBE_NAMESPACE", "K8S_NAMESPACE");
+  if (ns) {
+    tier.namespace = ns.value;
+    tier.reasons.push(`namespace ${ns.value} from ${ns.key} in ${ns.file}`);
+    tier.label = `From ${ns.file}`;
+  }
+  const named = pick("KUBECONTEXT", "KUBE_CONTEXT", "K8S_CONTEXT");
+  if (named) {
+    if (contexts.some((info) => info.name === named.value)) {
+      tier.context = named.value;
+      tier.confidence = 0.95;
+      tier.reasons.push(`context ${named.value} from ${named.key} in ${named.file}`);
+      tier.label = `From ${named.file}`;
+    } else
+      tier.reasons.push(`${named.key} in ${named.file} names "${named.value}", which is not in the kubeconfig`);
+    return tier;
+  }
+  const profileEnv = pick("AWS_PROFILE");
+  if (profileEnv) {
+    const profile = deps.awsProfiles()[profileEnv.value];
+    if (!profile?.accountId)
+      tier.reasons.push(`AWS profile ${profileEnv.value} in ${profileEnv.file} has no account id to match`);
+    else {
+      let matches = contexts.filter((info) => info.account === profile.accountId);
+      const sameRegion = matches.filter((info) => info.region === profile.region);
+      if (matches.length > 1 && sameRegion.length > 0)
+        matches = sameRegion;
+      if (matches.length === 1) {
+        tier.context = matches[0].name;
+        tier.confidence = 0.8;
+        tier.reasons.push(`AWS profile ${profileEnv.value} (account ${profile.accountId}) from ${profileEnv.file} matches ${matches[0].name}`);
+        tier.label = `From ${profileEnv.file}`;
+      } else if (matches.length > 1) {
+        tier.candidates = matches.map((info) => info.name);
+        tier.confidence = 0.4;
+        tier.reasons.push(`AWS profile ${profileEnv.value} (account ${profile.accountId}) from ${profileEnv.file} fits ${matches.length} clusters: pick one`);
+        tier.label = `From ${profileEnv.file}`;
+      } else
+        tier.reasons.push(`AWS profile ${profileEnv.value} (account ${profile.accountId}) matches no cluster in the kubeconfig`);
+    }
+  }
+  return tier;
+};
+var listFiles = (root) => {
+  const out = [];
+  const queue = [{ dir: root, depth: 0 }];
+  while (queue.length > 0 && out.length < MAX_FILES) {
+    const { dir, depth } = queue.shift();
+    let entries;
+    try {
+      entries = readdirSync3(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (out.length >= MAX_FILES)
+        break;
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name) && depth < MAX_DEPTH)
+          queue.push({ dir: join5(dir, entry.name), depth: depth + 1 });
+      } else if (entry.isFile())
+        out.push(join5(dir, entry.name));
+    }
+  }
+  return out;
+};
+var readSmall = (file) => {
+  try {
+    if (statSync(file).size > MAX_FILE_BYTES)
+      return null;
+    return readFileSync4(file, "utf8");
+  } catch {
+    return null;
+  }
+};
+var blockAfter = (text, at) => text.slice(at, at + 2500);
+var terraformVotes = (text, file, ctx) => {
+  const headers = [
+    [/resource\s+"aws_eks_cluster"\s+"[^"]+"\s*\{/g, /^\s*name\s*=\s*"([^"$]+)"/m],
+    [/data\s+"aws_eks_cluster"\s+"[^"]+"\s*\{/g, /^\s*name\s*=\s*"([^"$]+)"/m],
+    [/module\s+"eks[^"]*"\s*\{/g, /^\s*cluster_name\s*=\s*"([^"$]+)"/m]
+  ];
+  for (const [header, field] of headers) {
+    for (const match of text.matchAll(header)) {
+      const name = field.exec(blockAfter(text, (match.index ?? 0) + match[0].length))?.[1];
+      if (name)
+        ctx.push({ by: "cluster", value: name, weight: 40, reason: `cluster ${name} from ${file}` });
+    }
+  }
+};
+var isK8sDoc = (doc) => typeof doc.apiVersion === "string" && typeof doc.kind === "string";
+var repoTier = async (dir, contexts) => {
+  const tier = emptyTier("From repo files");
+  const ctxVotes = [];
+  const nsVotes = [];
+  const plain = new Map;
+  let release;
+  for (const path of listFiles(dir)) {
+    const file = relative(dir, path);
+    const name = basename(path);
+    const lower = name.toLowerCase();
+    const isYaml = lower.endsWith(".yaml") || lower.endsWith(".yml");
+    if (!isYaml && !lower.endsWith(".tf") && name !== "Tiltfile")
+      continue;
+    const text = readSmall(path);
+    if (text === null)
+      continue;
+    if (lower.endsWith(".tf")) {
+      terraformVotes(text, file, ctxVotes);
+      continue;
+    }
+    if (name === "Tiltfile") {
+      for (const match of text.matchAll(/allow_k8s_contexts\(\s*(\[[^\]]*\]|["'][^"']+["'])\s*\)/g)) {
+        for (const item of match[1].matchAll(/["']([^"']+)["']/g))
+          ctxVotes.push({ by: "name", value: item[1], weight: 70, reason: `context ${item[1]} from ${file}` });
+      }
+      continue;
+    }
+    for (const parsed of $parseAllDocuments(text, { prettyErrors: false })) {
+      if (parsed.errors.length > 0)
+        continue;
+      const doc = parsed.toJS({ maxAliasCount: 100 });
+      if (!doc || typeof doc !== "object" || Array.isArray(doc))
+        continue;
+      const item = doc;
+      if (name === "Chart.yaml" && typeof item.name === "string") {
+        release ??= item.name;
+        continue;
+      }
+      if (typeof item.apiVersion === "string" && item.apiVersion.startsWith("skaffold/")) {
+        const kc = item.deploy?.kubeContext;
+        if (typeof kc === "string")
+          ctxVotes.push({ by: "name", value: kc, weight: 70, reason: `context ${kc} from ${file}` });
+        continue;
+      }
+      if (!isK8sDoc(item) && !(lower === "kustomization.yaml" || lower === "kustomization.yml"))
+        continue;
+      const apiVersion = String(item.apiVersion ?? "");
+      const kind = String(item.kind ?? "");
+      const spec = item.spec ?? {};
+      const metaNs = item.metadata?.namespace;
+      if (apiVersion.startsWith("argoproj.io/") && (kind === "Application" || kind === "ApplicationSet")) {
+        const destination = (kind === "Application" ? spec.destination : spec.template?.spec?.destination) ?? {};
+        if (typeof destination.namespace === "string" && !destination.namespace.includes("{"))
+          nsVotes.push({ value: destination.namespace, weight: 60, reason: `namespace ${destination.namespace} from ${file}` });
+        if (typeof destination.name === "string" && destination.name !== "in-cluster" && !destination.name.includes("{"))
+          ctxVotes.push({ by: "cluster", value: destination.name, weight: 60, reason: `cluster ${destination.name} from ${file}` });
+        if (typeof destination.server === "string" && !/kubernetes\.default\.svc/.test(destination.server))
+          ctxVotes.push({ by: "server", value: destination.server, weight: 60, reason: `cluster ${destination.server} from ${file}` });
+        continue;
+      }
+      if (apiVersion.startsWith("kustomize.toolkit.fluxcd.io/") || apiVersion.startsWith("helm.toolkit.fluxcd.io/")) {
+        if (typeof spec.targetNamespace === "string")
+          nsVotes.push({ value: spec.targetNamespace, weight: 50, reason: `namespace ${spec.targetNamespace} from ${file}` });
+        else if (typeof metaNs === "string")
+          nsVotes.push({ value: metaNs, weight: 50, reason: `namespace ${metaNs} from ${file}` });
+        continue;
+      }
+      if (lower === "kustomization.yaml" || lower === "kustomization.yml") {
+        if (typeof item.namespace === "string")
+          nsVotes.push({ value: item.namespace, weight: 40, reason: `namespace ${item.namespace} from ${file}` });
+        continue;
+      }
+      if (typeof metaNs === "string" && kind !== "Namespace")
+        plain.set(metaNs, (plain.get(metaNs) ?? 0) + 1);
+    }
+  }
+  const resolved = [];
+  const named = new Map;
+  for (const vote of ctxVotes) {
+    const found = findContext(contexts, vote);
+    if (found) {
+      named.set(found.name, found);
+      resolved.push({ ...vote, value: found.name });
+    }
+  }
+  const ctx = tally(resolved);
+  if (ctx.best) {
+    tier.context = ctx.best;
+    tier.confidence = confidenceOf(ctx.score);
+    tier.reasons.push(...ctx.reasons);
+  } else if (ctx.tied.length > 1) {
+    tier.candidates = ctx.tied;
+    tier.confidence = 0.3;
+    tier.reasons.push(`${ctx.tied.length} clusters fit equally well: pick one`, ...ctx.reasons);
+  }
+  for (const [value, count] of plain)
+    nsVotes.push({ value, weight: Math.min(count, 10) * 2, reason: `namespace ${value} in ${count} manifest${count === 1 ? "" : "s"}` });
+  const ns = tally(nsVotes);
+  if (ns.best) {
+    tier.namespace = ns.best;
+    tier.confidence = Math.max(tier.confidence, confidenceOf(ns.score));
+    tier.reasons.push(...ns.reasons);
+  } else if (ns.tied.length > 1)
+    tier.reasons.push(`namespaces ${ns.tied.join(", ")} fit equally well, none preselected`);
+  if (release)
+    tier.releaseHint = release;
+  return tier;
+};
+var resolveScope = async (directory, deps) => {
+  const dir = resolve(directory);
+  const pick = deps.picks[dir];
+  const defaults = await deps.loadContexts();
+  if (pick && defaults.some((info) => info.name === pick.context)) {
+    const env = await envTier(dir, deps).catch(() => emptyTier(""));
+    return {
+      context: pick.context,
+      namespace: pick.namespace,
+      source: "Your pick",
+      sourceKind: "pick",
+      confidence: 1,
+      reasons: [`You picked ${pick.context}${pick.namespace ? ` and ${pick.namespace}` : ""} for this project`],
+      candidates: [],
+      ...env.kubeconfig ? { kubeconfig: env.kubeconfig } : {}
+    };
+  }
+  const env = await envTier(dir, deps);
+  const repo = await repoTier(dir, env.kubeconfig ? await deps.loadContexts(env.kubeconfig) : defaults);
+  const contextTier = env.context !== null || env.candidates.length > 0 ? env : repo;
+  const namespaceTier = env.namespace !== null ? env : repo;
+  const context = contextTier.context;
+  const namespace = namespaceTier.namespace;
+  const candidates = context ? [] : contextTier.candidates;
+  if (!context && candidates.length === 0 && !namespace)
+    return null;
+  const primary = context || candidates.length > 0 ? contextTier : namespaceTier;
+  const usesRepo = contextTier === repo || namespaceTier === repo;
+  return {
+    context,
+    namespace,
+    source: primary.label,
+    sourceKind: primary === env ? "env" : "repo",
+    confidence: Math.max(primary.confidence, 0.3),
+    reasons: [...new Set([...env.reasons, ...usesRepo ? repo.reasons : []])],
+    candidates,
+    ...env.kubeconfig ? { kubeconfig: env.kubeconfig } : {},
+    ...repo.releaseHint ? { releaseHint: repo.releaseHint } : {}
+  };
+};
+var createScopeCache = (resolveFn, ttlMs = 5 * 60 * 1000, now = Date.now) => {
+  const entries = new Map;
+  return {
+    get: async (dir) => {
+      const key = resolve(dir);
+      const hit = entries.get(key);
+      if (hit && now() - hit.at < ttlMs)
+        return hit.value;
+      const value = await resolveFn(key);
+      entries.set(key, { at: now(), value });
+      return value;
+    },
+    invalidate: (dir) => {
+      if (dir)
+        entries.delete(resolve(dir));
+      else
+        entries.clear();
+    }
+  };
+};
+
+// src/service/logs.ts
+import { createHash as createHash4 } from "node:crypto";
+var BATCH_MS2 = 250;
+var LEASE_MS2 = 60000;
+var SWEEP_MS2 = 15000;
+var EMIT_CHARS2 = 60000;
+var LINE_MAX = 8000;
+var TAIL_MAX = 5000;
+var streams = new Map;
+var sweeper3 = null;
+var counter = 0;
+var clip2 = (line) => line.length > LINE_MAX ? `${line.slice(0, LINE_MAX)} [line shortened]` : line;
+var flush2 = (stream) => {
+  stream.flushTimer = null;
+  const lines = stream.pending;
+  stream.pending = [];
+  stream.pendingChars = 0;
+  if (lines.length === 0 || stream.closed)
+    return;
+  let chunk = [];
+  let size = 0;
+  for (const line of lines) {
+    if (chunk.length > 0 && size + line.length + 1 > EMIT_CHARS2) {
+      publish("logs", { streamId: stream.id, lines: chunk });
+      chunk = [];
+      size = 0;
+    }
+    chunk.push(line);
+    size += line.length + 1;
+  }
+  if (chunk.length > 0)
+    publish("logs", { streamId: stream.id, lines: chunk });
+};
+var queue = (stream, line) => {
+  const text = clip2(line);
+  stream.pending.push(text);
+  stream.pendingChars += text.length + 1;
+  if (stream.pendingChars >= EMIT_CHARS2) {
+    if (stream.flushTimer)
+      clearTimeout(stream.flushTimer);
+    flush2(stream);
+    return;
+  }
+  if (!stream.flushTimer)
+    stream.flushTimer = setTimeout(() => flush2(stream), BATCH_MS2);
+};
+var close = (stream, state, code) => {
+  if (stream.closed)
+    return;
+  stream.closed = true;
+  stream.stream?.abort();
+  stream.stream = null;
+  if (stream.flushTimer)
+    clearTimeout(stream.flushTimer);
+  stream.flushTimer = null;
+  flush2(stream);
+  if (state)
+    publish("logs", { streamId: stream.id, state, ...code ? { code } : {} });
+  if (streams.get(stream.id) === stream)
+    streams.delete(stream.id);
+  if (streams.size === 0 && sweeper3) {
+    clearInterval(sweeper3);
+    sweeper3 = null;
+  }
+};
+var ensureSweeper2 = () => {
+  if (sweeper3)
+    return;
+  sweeper3 = setInterval(() => {
+    const now = Date.now();
+    for (const stream of [...streams.values()])
+      if (now - stream.leaseAt > LEASE_MS2)
+        close(stream);
+  }, SWEEP_MS2);
+  sweeper3.unref();
+};
+var startLogs = async (request) => {
+  const key = `${request.target.kubeconfig ?? ""}|${request.target.context}|${request.namespace}|${request.pod}|${request.container ?? ""}|${request.previous ? "previous" : ""}`;
+  const id = `l_${createHash4("sha1").update(`${key}|${++counter}`).digest("hex").slice(0, 12)}`;
+  const stream = {
+    id,
+    key,
+    request,
+    leaseAt: Date.now(),
+    closed: false,
+    stream: null,
+    pending: [],
+    pendingChars: 0,
+    flushTimer: null
+  };
+  const tail = Math.min(TAIL_MAX, Math.max(1, Math.trunc(request.tailLines) || 500));
+  try {
+    stream.stream = await openStream(request.target, `/api/v1/namespaces/${encodeURIComponent(request.namespace)}/pods/${encodeURIComponent(request.pod)}/log`, {
+      follow: "true",
+      container: request.container,
+      previous: request.previous ? "true" : undefined,
+      timestamps: request.timestamps ? "true" : undefined,
+      tailLines: String(tail)
+    }, (line) => queue(stream, line), (error) => close(stream, error ? "error" : "ended", error ? toReply(error).code : undefined));
+  } catch (error) {
+    if (error instanceof K8sError)
+      throw error;
+    throw error;
+  }
+  if (stream.closed)
+    return { streamId: id };
+  streams.set(id, stream);
+  ensureSweeper2();
+  return { streamId: id };
+};
+var stopLogs = (id) => {
+  const stream = streams.get(id);
+  if (stream)
+    close(stream);
+};
+var renewLogLeases = (ids) => {
+  const known = [];
+  const unknown = [];
+  const now = Date.now();
+  for (const id of ids) {
+    const stream = streams.get(id);
+    if (stream && !stream.closed) {
+      stream.leaseAt = now;
+      known.push(id);
+    } else
+      unknown.push(id);
+  }
+  return { known, unknown };
+};
+var closeAllLogs = () => {
+  for (const stream of [...streams.values()])
+    close(stream);
+};
+
 // src/service/routes.ts
-var text2 = (params, key) => {
+var text3 = (params, key) => {
   const value = params[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 };
 var need = (params, key) => {
-  const value = text2(params, key);
+  const value = text3(params, key);
   if (!value)
     throw new K8sError("BAD_REQUEST", `Missing "${key}".`);
   return value;
 };
 var flag = (params, key) => params[key] === true || params[key] === "true" || params[key] === "1" || params[key] === 1;
 var namespaceOf = (params) => {
-  const value = text2(params, "namespace");
+  const value = text3(params, "namespace");
   return value && value !== "_all" ? value : null;
 };
 var scopes = createScopeCache((dir) => resolveScope(dir, {
@@ -9005,7 +9461,7 @@ var scopes = createScopeCache((dir) => resolveScope(dir, {
 var scopeFor = (dir) => scopes.get(dir);
 var targetFor = async (params) => {
   const context = need(params, "context");
-  const dir = text2(params, "dir");
+  const dir = text3(params, "dir");
   const kubeconfig = dir ? (await scopeFor(dir))?.kubeconfig : undefined;
   await contextInfo(context, kubeconfig);
   return kubeconfig ? { context, kubeconfig } : { context };
@@ -9029,7 +9485,7 @@ var publishLock = async (params) => {
 };
 var panelObject = (info, object, reveal = false) => forPanel(isSecret(info), object, reveal);
 var audit = (params, target, verb, what) => {
-  appendAudit({ project: text2(params, "dir") ?? null, context: target.context, verb, target: what, source: "panel" });
+  appendAudit({ project: text3(params, "dir") ?? null, context: target.context, verb, target: what, source: "panel" });
 };
 var writeNamespace = async (target, info, params) => {
   if (!info.namespaced)
@@ -9070,7 +9526,7 @@ var refOf = (info, namespace, name) => `${info.kind}/${name}${namespace ? ` in $
 var routes = {
   "GET /health": async () => ({ ok: true }),
   "GET /contexts": async (params) => {
-    const dir = text2(params, "dir");
+    const dir = text3(params, "dir");
     const scope = dir ? await scopeFor(dir) : null;
     const config = await loadKubeconfig(scope?.kubeconfig);
     const locks = readLocks();
@@ -9130,7 +9586,7 @@ var routes = {
     const info = await resolveKind(target, need(params, "kind"));
     const answer = await callJson(target, {
       path: kindPath(info, namespaceOf(params)),
-      query: { labelSelector: text2(params, "selector"), fieldSelector: text2(params, "fieldSelector") },
+      query: { labelSelector: text3(params, "selector"), fieldSelector: text3(params, "fieldSelector") },
       timeoutMs: 60000
     });
     return {
@@ -9238,9 +9694,314 @@ var routes = {
     if (!dryRun)
       audit(params, target, "restart", refOf(info, namespace, name));
     return { ok: true, dryRun };
+  },
+  "POST /cordon": async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, "dryRun");
+    await guard(target, dryRun);
+    const info = await resolveKind(target, "Node");
+    const name = need(params, "name");
+    const unschedulable = flag(params, "unschedulable");
+    await callJson(target, {
+      method: "PATCH",
+      path: kindPath(info, null, name),
+      query: { dryRun: dryRun ? "All" : undefined },
+      contentType: "application/merge-patch+json",
+      body: JSON.stringify({ spec: { unschedulable } })
+    });
+    if (!dryRun)
+      audit(params, target, unschedulable ? "cordon" : "uncordon", `Node/${name}`);
+    return { ok: true, dryRun, unschedulable };
+  },
+  "GET /drain": async (params) => {
+    const target = await targetFor(params);
+    const name = need(params, "name");
+    const pods = await callJson(target, { path: "/api/v1/pods", query: { fieldSelector: `spec.nodeName=${name}` }, timeoutMs: 60000 });
+    return {
+      ok: true,
+      pods: (pods.items ?? []).map((pod) => ({
+        name: String(pod.metadata?.name ?? ""),
+        namespace: String(pod.metadata?.namespace ?? ""),
+        kind: drainKind(pod),
+        problem: drainIssue(pod)
+      }))
+    };
+  },
+  "POST /drain": async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, "dryRun");
+    await guard(target, dryRun);
+    const name = need(params, "name");
+    const result = await run(kubectlPath(), ["--context", target.context, ...kubeconfigArgs(target.kubeconfig), "drain", name, "--ignore-daemonsets", "--delete-emptydir-data", "--timeout=120s", ...dryRun ? ["--dry-run=server"] : []], { timeoutMs: 180000, maxBuffer: 2000000 });
+    if (result.code !== 0)
+      throw new K8sError("K8S_ERROR", (result.stderr || result.stdout).trim().slice(0, 400) || "The drain did not finish.");
+    if (!dryRun)
+      audit(params, target, "drain", `Node/${name}`);
+    return { ok: true, dryRun, output: result.stdout.trim() };
+  },
+  "POST /evict": async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, "dryRun");
+    await guard(target, dryRun);
+    const namespace = namespaceOf(params) ?? "default";
+    const name = need(params, "name");
+    await callJson(target, {
+      method: "POST",
+      path: `/api/v1/namespaces/${encodeURIComponent(namespace)}/pods/${encodeURIComponent(name)}/eviction`,
+      query: { dryRun: dryRun ? "All" : undefined },
+      body: JSON.stringify({ apiVersion: "policy/v1", kind: "Eviction", metadata: { name, namespace } })
+    });
+    if (!dryRun)
+      audit(params, target, "evict", `Pod/${name} in ${namespace}`);
+    return { ok: true, dryRun };
+  },
+  "GET /revisions": async (params) => {
+    const target = await targetFor(params);
+    const info = await resolveKind(target, need(params, "kind"));
+    const namespace = await writeNamespace(target, info, params);
+    const name = need(params, "name");
+    const object = await callJson(target, { path: kindPath(info, namespace, name) });
+    let revisions = [];
+    let current = null;
+    if (info.kind === "Deployment") {
+      const replicaSets = await callJson(target, { path: kindPath(await resolveKind(target, "ReplicaSet"), namespace), timeoutMs: 60000 });
+      revisions = deploymentRevisions(object, replicaSets.items ?? []);
+      current = currentRevision(object);
+    } else if (info.kind === "StatefulSet") {
+      const history = await callJson(target, { path: kindPath(await resolveKind(target, "ControllerRevision"), namespace), timeoutMs: 60000 });
+      revisions = statefulSetRevisions(object, history.items ?? []);
+      current = revisions[0]?.revision ?? null;
+    } else
+      throw new K8sError("INVALID", `${info.kind} keeps no revision history.`);
+    return {
+      ok: true,
+      current,
+      revisions: revisions.map((rev) => ({
+        revision: rev.revision,
+        name: rev.name,
+        created: rev.created,
+        images: (rev.template?.spec?.containers ?? []).map((container) => String(container.image ?? ""))
+      }))
+    };
+  },
+  "POST /rollback": async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, "dryRun");
+    await guard(target, dryRun);
+    const info = await resolveKind(target, need(params, "kind"));
+    const namespace = await writeNamespace(target, info, params);
+    const name = need(params, "name");
+    const revision = Number(params.revision);
+    if (!Number.isInteger(revision))
+      throw new K8sError("BAD_REQUEST", "Pick a revision to roll back to.");
+    const object = await callJson(target, { path: kindPath(info, namespace, name) });
+    let revisions = [];
+    if (info.kind === "Deployment") {
+      const replicaSets = await callJson(target, { path: kindPath(await resolveKind(target, "ReplicaSet"), namespace), timeoutMs: 60000 });
+      revisions = deploymentRevisions(object, replicaSets.items ?? []);
+    } else if (info.kind === "StatefulSet") {
+      const history = await callJson(target, { path: kindPath(await resolveKind(target, "ControllerRevision"), namespace), timeoutMs: 60000 });
+      revisions = statefulSetRevisions(object, history.items ?? []);
+    } else
+      throw new K8sError("INVALID", `${info.kind} cannot be rolled back.`);
+    const chosen = revisions.find((entry) => entry.revision === revision);
+    if (!chosen?.template)
+      throw new K8sError("NOT_FOUND", `Revision ${revision} is no longer available.`);
+    await callJson(target, {
+      method: "PATCH",
+      path: kindPath(info, namespace, name),
+      query: { dryRun: dryRun ? "All" : undefined },
+      contentType: "application/json-patch+json",
+      body: JSON.stringify([{ op: "replace", path: "/spec/template", value: chosen.template }])
+    });
+    if (!dryRun)
+      audit(params, target, `rollback to ${revision}`, refOf(info, namespace, name));
+    return { ok: true, dryRun, revision };
+  },
+  "POST /trigger": async (params) => {
+    const target = await targetFor(params);
+    await guard(target, false);
+    const info = await resolveKind(target, "CronJob");
+    const namespace = await writeNamespace(target, info, params);
+    const name = need(params, "name");
+    const cronJob = await callJson(target, { path: kindPath(info, namespace, name) });
+    const job = manualJobFor(cronJob, new Date);
+    const jobInfo = await resolveKind(target, "Job");
+    const created = await callJson(target, { method: "POST", path: kindPath(jobInfo, namespace), body: JSON.stringify(job) });
+    audit(params, target, "trigger", `CronJob/${name} in ${namespace}`);
+    return { ok: true, job: String(created.metadata?.name ?? "") };
+  },
+  "POST /pause": async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, "dryRun");
+    await guard(target, dryRun);
+    const info = await resolveKind(target, "Deployment");
+    const namespace = await writeNamespace(target, info, params);
+    const name = need(params, "name");
+    const paused = flag(params, "paused");
+    await callJson(target, {
+      method: "PATCH",
+      path: kindPath(info, namespace, name),
+      query: { dryRun: dryRun ? "All" : undefined },
+      contentType: "application/merge-patch+json",
+      body: JSON.stringify({ spec: { paused } })
+    });
+    if (!dryRun)
+      audit(params, target, paused ? "pause" : "resume", refOf(info, namespace, name));
+    return { ok: true, dryRun, paused };
+  },
+  "POST /suspend": async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, "dryRun");
+    await guard(target, dryRun);
+    const info = await resolveKind(target, need(params, "kind"), text3(params, "apiVersion"));
+    if (info.kind !== "CronJob" && !/toolkit\.fluxcd\.io/.test(info.group))
+      throw new K8sError("INVALID", `${info.kind} cannot be suspended.`);
+    const namespace = await writeNamespace(target, info, params);
+    const name = need(params, "name");
+    const suspend = flag(params, "suspend");
+    await callJson(target, {
+      method: "PATCH",
+      path: kindPath(info, namespace, name),
+      query: { dryRun: dryRun ? "All" : undefined },
+      contentType: "application/merge-patch+json",
+      body: JSON.stringify(fluxPatch(suspend ? "suspend" : "resume", new Date))
+    });
+    if (!dryRun)
+      audit(params, target, suspend ? "suspend" : "resume", refOf(info, namespace, name));
+    return { ok: true, dryRun, suspend };
+  },
+  "POST /flux": async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, "dryRun");
+    await guard(target, dryRun);
+    const info = await resolveKind(target, need(params, "kind"), text3(params, "apiVersion"));
+    if (!/toolkit\.fluxcd\.io/.test(info.group))
+      throw new K8sError("INVALID", `${info.kind} is not a Flux resource.`);
+    const action = need(params, "action");
+    if (action !== "reconcile" && action !== "suspend" && action !== "resume")
+      throw new K8sError("BAD_REQUEST", "Unknown Flux action.");
+    const namespace = await writeNamespace(target, info, params);
+    const name = need(params, "name");
+    await callJson(target, {
+      method: "PATCH",
+      path: kindPath(info, namespace, name),
+      query: { dryRun: dryRun ? "All" : undefined },
+      contentType: "application/merge-patch+json",
+      body: JSON.stringify(fluxPatch(action, new Date))
+    });
+    if (!dryRun)
+      audit(params, target, `flux ${action}`, refOf(info, namespace, name));
+    return { ok: true, dryRun, action };
+  },
+  "POST /argo": async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, "dryRun");
+    await guard(target, dryRun);
+    const info = await resolveKind(target, need(params, "kind"), text3(params, "apiVersion") ?? "argoproj.io/v1alpha1");
+    if (!info.group.startsWith("argoproj.io"))
+      throw new K8sError("INVALID", `${info.kind} is not an Argo CD resource.`);
+    const action = need(params, "action");
+    if (action !== "refresh" && action !== "sync")
+      throw new K8sError("BAD_REQUEST", "Unknown Argo CD action.");
+    const namespace = await writeNamespace(target, info, params);
+    const name = need(params, "name");
+    await callJson(target, {
+      method: "PATCH",
+      path: kindPath(info, namespace, name),
+      query: { dryRun: dryRun ? "All" : undefined },
+      contentType: "application/merge-patch+json",
+      body: JSON.stringify(argoPatch(action, text3(params, "revision")))
+    });
+    if (!dryRun)
+      audit(params, target, `argo ${action}`, refOf(info, namespace, name));
+    return { ok: true, dryRun, action };
+  },
+  "POST /console": async (params) => {
+    const target = await targetFor(params);
+    await guard(target, false);
+    const namespace = need(params, "namespace");
+    const pod = need(params, "pod");
+    const container = text3(params, "container");
+    const command = need(params, "command");
+    if (command.length > 4000)
+      throw new K8sError("BAD_REQUEST", "A command can hold at most 4000 characters.");
+    const result = await run(kubectlPath(), ["--context", target.context, ...kubeconfigArgs(target.kubeconfig), "-n", namespace, "exec", pod, ...container ? ["-c", container] : [], "--", "sh", "-c", command], { timeoutMs: 30000, maxBuffer: 1e6 });
+    audit(params, target, "exec", `Pod/${pod} in ${namespace}`);
+    return { ok: true, output: result.stdout, errorOutput: result.stderr, code: result.code };
+  },
+  "POST /logs": async (params) => {
+    const target = await targetFor(params);
+    const namespace = need(params, "namespace");
+    const pod = need(params, "pod");
+    const handle = await startLogs({
+      target,
+      namespace,
+      pod,
+      container: text3(params, "container"),
+      previous: flag(params, "previous"),
+      timestamps: flag(params, "timestamps"),
+      tailLines: Number(params.tailLines) || 500
+    });
+    return { ok: true, ...handle };
+  },
+  "POST /logs/lease": async (params) => {
+    const ids = Array.isArray(params.streamIds) ? params.streamIds.filter((id) => typeof id === "string") : [];
+    const { known, unknown } = renewLogLeases(ids);
+    if (unknown.length > 0)
+      return { ok: false, code: "UNKNOWN_WATCH", error: "Some log views ended. Open them again.", known, unknown };
+    return { ok: true, known, unknown };
+  },
+  "POST /logs/stop": async (params) => {
+    const id = text3(params, "streamId");
+    if (id)
+      stopLogs(id);
+    return { ok: true };
+  },
+  "GET /forwards": async () => ({ ok: true, forwards: listForwards() }),
+  "POST /forward": async (params) => {
+    const target = await targetFor(params);
+    await guard(target, false);
+    const resource = need(params, "resource");
+    if (resource !== "pod" && resource !== "service" && resource !== "svc")
+      throw new K8sError("BAD_REQUEST", "A forward targets a pod or a service.");
+    const kind = resource === "pod" ? "pod" : "svc";
+    const namespace = need(params, "namespace");
+    const name = need(params, "name");
+    const remotePort = Number(params.remotePort);
+    if (!Number.isInteger(remotePort) || remotePort < 1 || remotePort > 65535)
+      throw new K8sError("BAD_REQUEST", "Pick a port from 1 to 65535.");
+    const localPort = params.localPort === undefined || params.localPort === null || params.localPort === "" ? undefined : Number(params.localPort);
+    if (localPort !== undefined && (!Number.isInteger(localPort) || localPort < 1 || localPort > 65535))
+      throw new K8sError("BAD_REQUEST", "Pick a local port from 1 to 65535.");
+    const forward = await createForward({
+      context: target.context,
+      ...!target.kubeconfig ? {} : { kubeconfig: target.kubeconfig },
+      namespace,
+      kind,
+      name,
+      ...localPort === undefined ? {} : { localPort },
+      remotePort
+    });
+    return { ok: true, forward };
+  },
+  "POST /forward/stop": async (params) => {
+    const id = need(params, "id");
+    stopForward(id);
+    return { ok: true, forwards: listForwards() };
+  },
+  "GET /audit": async (params) => {
+    const limit = Math.min(500, Math.max(1, Number(params.limit) || 100));
+    const project = text3(params, "dir");
+    const context = text3(params, "context");
+    const entries = readAudit(limit * 4).map(parseAuditLine).filter((entry) => entry !== null).filter((entry) => (!project || entry.project === project) && (!context || entry.context === context)).slice(-limit).reverse();
+    return { ok: true, entries };
   }
 };
-var shutdownRoutes = () => closeAllWatches();
+var shutdownRoutes = () => {
+  closeAllWatches();
+  closeAllLogs();
+};
 
 // src/service/main.ts
 var host = createServiceHost({ env: process.env });
@@ -9283,9 +10044,13 @@ http2.createServer((req, res) => {
 cleanupStaleProxies().catch(() => {
   return;
 });
+restoreForwards().catch(() => {
+  return;
+});
 var shutdown = () => {
   shutdownRoutes();
   stopAllProxies();
+  shutdownForwards();
   process.exit(0);
 };
 process.on("SIGTERM", shutdown);

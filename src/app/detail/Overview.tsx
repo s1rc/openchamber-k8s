@@ -2,12 +2,17 @@ import type { ComponentChildren } from 'preact';
 import { Chip, Dot, KV, Section } from '@openchamber-ext/shared-ui/preact';
 import { ageText, clipText } from '../../shared/format.ts';
 import { podSpecOf, statusOf, timeOf, type KindView } from '../../shared/kinds.ts';
+import { nodeShellCommand, SHELL_COPIED, shellCommand } from '../../shared/shell.ts';
 import type { Obj } from '../../shared/types.ts';
+import { host, notify } from '../host.ts';
+import { Button } from '../kit.tsx';
 
 interface Props {
   object: Obj;
   view: KindView;
   now: number;
+  context: string;
+  namespace: string;
 }
 
 const arr = (value: unknown): Obj[] => (Array.isArray(value) ? (value as Obj[]) : []);
@@ -150,7 +155,7 @@ const SecretKeys = ({ object }: { object: Obj }) => {
 
 const when = (ms: number | null, now: number): string => (ms === null ? '' : `${new Date(ms).toLocaleString()} (${ageText(ms, now)} ago)`);
 
-export const Overview = ({ object, view, now }: Props) => {
+export const Overview = ({ object, view, now, context, namespace }: Props) => {
   const meta = object.metadata ?? {};
   const status = statusOf(view, object);
   const owners = arr(meta.ownerReferences);
@@ -162,12 +167,29 @@ export const Overview = ({ object, view, now }: Props) => {
   if (meta.deletionTimestamp) rows.push(['Deleting since', when(timeOf(meta.deletionTimestamp), now)]);
   for (const [label, value] of view.details?.(object) ?? []) rows.push([label, <span class="k8s-wrap">{value}</span>]);
   const conditions = arr(object.status?.conditions);
+  const podContainer = Array.isArray(object.spec?.containers) ? String((object.spec.containers as Obj[])[0]?.name ?? '') : '';
+  const shellText = object.kind === 'Node' ? nodeShellCommand(context, String(meta.name ?? '')) : object.kind === 'Pod' ? shellCommand(context, String(meta.namespace ?? namespace) || 'default', String(meta.name ?? ''), podContainer || undefined) : '';
 
   return (
     <div class="k8s-overview">
       <Section>
         <KV items={rows} />
       </Section>
+      {shellText ? (
+        <Section title="Shell">
+          <div class="sui-muted sui-small">Paste this in OpenChamber's terminal to open a shell. The panel never opens a terminal itself.</div>
+          <pre class="k8s-yaml k8s-yaml--wrap sui-mono">{shellText}</pre>
+          <Button
+            label="Copy command"
+            size="xs"
+            variant="outline"
+            onClick={() => {
+              void host.writeClipboard(shellText);
+              notify('success', SHELL_COPIED);
+            }}
+          />
+        </Section>
+      ) : null}
       <Section title="Labels">
         <Chips values={meta.labels} empty="No labels." />
       </Section>

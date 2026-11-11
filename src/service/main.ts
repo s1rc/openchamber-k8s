@@ -2,6 +2,7 @@ import http from 'node:http';
 import { createServiceHost } from '@openchamber/sdk';
 import { toReply } from './errors.ts';
 import { cleanupStaleProxies, stopAllProxies } from './proxy.ts';
+import { restoreForwards, shutdownForwards } from './forwards.ts';
 import { routes, shutdownRoutes } from './routes.ts';
 import { setEmitter } from './watch.ts';
 
@@ -54,10 +55,12 @@ http
   .listen(Number(process.env.OPENCHAMBER_SERVICE_PORT), '127.0.0.1');
 
 void cleanupStaleProxies().catch(() => undefined);
+void restoreForwards().catch(() => undefined);
 
 const shutdown = (): void => {
   shutdownRoutes();
   stopAllProxies();
+  shutdownForwards();
   process.exit(0);
 };
 process.on('SIGTERM', shutdown);

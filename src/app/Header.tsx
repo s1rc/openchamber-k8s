@@ -1,7 +1,7 @@
 import { useMemo } from 'preact/hooks';
 import { Chip, Dot } from '@openchamber-ext/shared-ui/preact';
 import type { ScopeResult } from '../shared/types.ts';
-import { Badge, Select } from './kit.tsx';
+import { Badge, Button, Select } from './kit.tsx';
 import { useWatch, type Live } from './useWatch.ts';
 
 export interface ContextRow {
@@ -25,6 +25,9 @@ interface Props {
   layout: 'page' | 'rail';
   onPickContext: (name: string) => void;
   onPickNamespace: (name: string) => void;
+  onUnlock: (name: string) => void;
+  onLockNow: (name: string) => void;
+  onActivity: () => void;
 }
 
 const LIVE_LOOK: Record<Live, { tone: 'success' | 'warning' | 'error' | 'muted'; label: string }> = {
@@ -36,7 +39,7 @@ const LIVE_LOOK: Record<Live, { tone: 'success' | 'warning' | 'error' | 'muted';
 
 const clock = (ms: number): string => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-export const Header = ({ contexts, context, namespace, dir, scope, live, layout, onPickContext, onPickNamespace }: Props) => {
+export const Header = ({ contexts, context, namespace, dir, scope, live, layout, onPickContext, onPickNamespace, onUnlock, onLockNow, onActivity }: Props) => {
   const namespaces = useWatch(context ? { context, namespace: '_all', kind: 'Namespace', dir } : null);
   const current = contexts.find((row) => row.name === context) ?? null;
 
@@ -85,10 +88,16 @@ export const Header = ({ contexts, context, namespace, dir, scope, live, layout,
           </span>
         ) : null}
         {current?.protected ? (
-          <span title={current.locked ? 'Production clusters are read-only until you unlock them.' : 'Writes are allowed until the unlock ends. Lock it again when you are done.'}>
+          <span class="k8s-lock" title={current.locked ? 'Production clusters are read-only until you unlock them.' : 'Writes are allowed until the unlock ends. Lock it again when you are done.'}>
             <Badge label={current.locked ? 'Locked' : current.unlockedUntil ? `Unlocked until ${clock(current.unlockedUntil)}` : 'Unlocked'} tone={current.locked ? 'warning' : 'error'} />
+            {current.locked ? (
+              <Button label="Unlock" size="xs" variant="outline" onClick={() => onUnlock(current.name)} />
+            ) : (
+              <Button label="Lock now" size="xs" variant="outline" onClick={() => onLockNow(current.name)} />
+            )}
           </span>
         ) : null}
+        {current ? <Button label="Activity" size="xs" variant="ghost" onClick={onActivity} /> : null}
         {context ? (
           <span class="k8s-live" title={look.label}>
             <Dot tone={look.tone} />

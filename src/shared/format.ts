@@ -66,3 +66,8 @@ export const coresText = (cores: number | null | undefined): string => (cores ==
 
 /** A string cut to `max` characters, with `...` when it was cut. */
 export const clipText = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 3)}...` : text);
+
+const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/g;
+
+/** Pod logs can carry color codes; the viewer shows plain text. */
+export const stripAnsi = (text: string): string => text.replace(ANSI, '');

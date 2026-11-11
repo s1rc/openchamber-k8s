@@ -66,4 +66,14 @@ export const appendAudit = (entry: AuditEntry): void => {
   appendFileSync(join(dir, 'audit.log'), `${JSON.stringify({ time: new Date().toISOString(), ...entry })}\n`, { mode: 0o600 });
 };
 
+/** The last `limit` lines of audit.log, newest first. Unreadable lines are skipped. */
+export const readAudit = (limit: number): string[] => {
+  try {
+    const lines = readFileSync(join(stateDir(), 'audit.log'), 'utf8').split('\n').filter(Boolean);
+    return lines.slice(-Math.max(1, limit));
+  } catch {
+    return [];
+  }
+};
+
 export const sockDir = (): string => ensureDir(join(ensureDir(stateDir()), 'sock'));

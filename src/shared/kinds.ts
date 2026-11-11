@@ -666,6 +666,7 @@ export const NAV: NavSection[] = [
   { id: 'events', title: 'Events', items: [item('Event')] },
   { id: 'access', title: 'Access control', items: ['ServiceAccount', 'ClusterRole', 'Role', 'ClusterRoleBinding', 'RoleBinding'].map(item) },
   { id: 'crds', title: 'Custom resources', items: [item('CustomResourceDefinition')] },
+  { id: 'forwards', title: 'Port forwarding', items: [{ kind: 'PortForwards', title: 'Port forwarding' }] },
 ];
 
 export const DEFAULT_KIND = 'Pod';

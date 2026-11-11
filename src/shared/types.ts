@@ -40,3 +40,21 @@ export interface Target {
   context: string;
   kubeconfig?: string;
 }
+
+export type ForwardKind = 'pod' | 'svc';
+export type ForwardStatus = 'starting' | 'live' | 'failed' | 'stopped';
+
+/** One port forward as the panel lists it. */
+export interface ForwardView {
+  id: string;
+  context: string;
+  namespace: string;
+  kind: ForwardKind;
+  name: string;
+  localPort: number;
+  remotePort: number;
+  status: ForwardStatus;
+  restarts: number;
+  error?: string;
+  url: string;
+}

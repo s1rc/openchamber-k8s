@@ -68,6 +68,8 @@ describe('kindPath', () => {
 const NOW = Date.parse('2026-11-11T12:00:00Z');
 const infoOf = (kind: string): KindInfo => findKind(kind)!;
 const navKinds = NAV.flatMap((section) => section.items.map((item) => item.kind));
+// Port forwarding is a view over the service's forwards, not a kind.
+const viewKinds = navKinds.filter((kind) => kind !== 'PortForwards');
 
 describe('navigation', () => {
   test('every kind in the plan table is there, once, and has a registry entry', () => {
@@ -78,19 +80,21 @@ describe('navigation', () => {
       'PersistentVolumeClaim', 'PersistentVolume', 'StorageClass', 'Namespace', 'Event',
       'ServiceAccount', 'ClusterRole', 'Role', 'ClusterRoleBinding', 'RoleBinding', 'CustomResourceDefinition',
     ];
-    expect([...navKinds].sort()).toEqual([...expected].sort());
-    for (const kind of navKinds) expect(findKind(kind)).toBeDefined();
+    expect([...viewKinds].sort()).toEqual([...expected].sort());
+    for (const kind of viewKinds) expect(findKind(kind)).toBeDefined();
+    expect(navKinds).toContain('PortForwards');
+    expect(findKind('PortForwards')).toBeUndefined();
   });
 
   test('the default kind is in the navigation and has a label', () => {
-    expect(navKinds).toContain(DEFAULT_KIND);
+    expect(viewKinds).toContain(DEFAULT_KIND);
     expect(navLabel('Pod')).toEqual({ section: 'Workloads', title: 'Pods' });
     expect(navLabel('Nothing')).toBeNull();
   });
 });
 
 describe('every view', () => {
-  for (const kind of navKinds) {
+  for (const kind of viewKinds) {
     test(`${kind} is well formed and survives an empty object`, () => {
       const info = infoOf(kind);
       const view = viewFor(info);
@@ -109,7 +113,7 @@ describe('every view', () => {
   }
 
   test('namespaced kinds offer a Namespace column and cluster kinds do not', () => {
-    for (const kind of navKinds) {
+    for (const kind of viewKinds) {
       const info = infoOf(kind);
       const has = viewFor(info).columns.some((column) => column.id === 'namespace');
       if (!info.namespaced) expect(has).toBe(false);
