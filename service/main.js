@@ -9919,7 +9919,6 @@ var routes = {
   },
   "POST /console": async (params) => {
     const target = await targetFor(params);
-    await guard(target, false);
     const namespace = need(params, "namespace");
     const pod = need(params, "pod");
     const container = text3(params, "container");
@@ -9961,7 +9960,6 @@ var routes = {
   "GET /forwards": async () => ({ ok: true, forwards: listForwards() }),
   "POST /forward": async (params) => {
     const target = await targetFor(params);
-    await guard(target, false);
     const resource = need(params, "resource");
     if (resource !== "pod" && resource !== "service" && resource !== "svc")
       throw new K8sError("BAD_REQUEST", "A forward targets a pod or a service.");

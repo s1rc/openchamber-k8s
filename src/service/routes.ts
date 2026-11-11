@@ -525,7 +525,6 @@ export const routes: Record<string, RouteHandler> = {
 
   'POST /console': async (params) => {
     const target = await targetFor(params);
-    await guard(target, false);
     const namespace = need(params, 'namespace');
     const pod = need(params, 'pod');
     const container = text(params, 'container');
@@ -573,7 +572,6 @@ export const routes: Record<string, RouteHandler> = {
 
   'POST /forward': async (params) => {
     const target = await targetFor(params);
-    await guard(target, false);
     const resource = need(params, 'resource');
     if (resource !== 'pod' && resource !== 'service' && resource !== 'svc') throw new K8sError('BAD_REQUEST', 'A forward targets a pod or a service.');
     const kind: ForwardKind = resource === 'pod' ? 'pod' : 'svc';
