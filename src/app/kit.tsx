@@ -3,11 +3,43 @@ import {
   type BadgeProps, type BannerProps, type ButtonProps, type CheckboxProps, type EmptyProps, type ListProps, type MenuProps, type ProgressProps, type SearchFieldProps, type SelectProps, type SpinnerProps,
   type TabsProps, type TextFieldProps,
 } from '@openchamber/sdk/ui';
-import { useKit, type Mount } from '@openchamber-ext/shared-ui/preact';
+import type { Mount } from '@openchamber-ext/shared-ui/preact';
+import { useEffect, useRef } from 'preact/hooks';
+import { proxyFunctions, signatureOf } from './stable.ts';
+
+/**
+ * Like shared-ui's `useKit`, but the control is repainted only when its data changed. The shared hook updates after every
+ * render, and a kit list repaints all its rows on an update, so a busy watch made the row under the mouse blink.
+ */
+const useStableKit = <P,>(mount: Mount<P>, props: P) => {
+  const ref = useRef<HTMLSpanElement>(null);
+  const handle = useRef<ReturnType<Mount<P>> | null>(null);
+  const latest = useRef(props);
+  latest.current = props;
+  const signature = signatureOf(props);
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (!ref.current) return;
+    handle.current = mount(ref.current, proxyFunctions(latest.current, latest));
+    mounted.current = true;
+    return () => {
+      handle.current?.dispose();
+      handle.current = null;
+      mounted.current = false;
+    };
+  }, []);
+  const painted = useRef(signature);
+  useEffect(() => {
+    if (!mounted.current || painted.current === signature) return;
+    painted.current = signature;
+    handle.current?.update(proxyFunctions(latest.current, latest));
+  }, [signature]);
+  return ref;
+};
 
 // The SDK kit controls as Preact components. Nothing here draws its own control.
 const wrap = <P,>(mount: Mount<P>, display: 'inline-flex' | 'block' = 'inline-flex') => (props: P) => {
-  const ref = useKit(mount, props);
+  const ref = useStableKit(mount, props);
   return <span ref={ref} style={{ display, minWidth: 0 }} />;
 };
 
