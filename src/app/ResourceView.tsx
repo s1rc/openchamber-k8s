@@ -1,6 +1,6 @@
 import type { ComponentChildren } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { cellText, findKind, rowText, sortRows, statusOf, viewFor, type KindInfo, type Tone, type ViewContext } from '../shared/kinds.ts';
+import { cellText, findKind, rowText, sortRows, statusOf, viewFor, type KindInfo, type KindView, type Tone, type ViewContext } from '../shared/kinds.ts';
 import type { Obj } from '../shared/types.ts';
 import { Drawer } from './detail/Drawer.tsx';
 import { ErrorState } from './errors.tsx';
@@ -8,7 +8,7 @@ import { Empty, List, SearchField, Spinner } from './kit.tsx';
 import { Table, type SortState } from './Table.tsx';
 import { UsageBar } from './UsageBar.tsx';
 import { useUsage } from './useUsage.ts';
-import { useWatch, type Live } from './useWatch.ts';
+import { useWatch, type Live, type WatchView } from './useWatch.ts';
 
 interface Props {
   context: string;
@@ -23,7 +23,30 @@ interface Props {
   /** Page layout: logs, consoles and port forwards open in the dock. */
   onOpenLogs?: (object: Obj) => void;
   onOpenConsole?: (object: Obj) => void;
+  /** A list that is not a watch (Helm releases): the items, state and reload come from here, and no watch is opened. */
+  source?: WatchView;
+  /** The table for this list when the registry has none for the kind (custom resources, Helm). */
+  view?: KindView;
+  /** What the service calls this kind, when it differs from `kind` (custom resources: `plural.group`). */
+  watchKind?: string;
+  /** Draws the drawer of the open object, in place of the resource drawer. */
+  renderDrawer?: (args: DrawerArgs) => ComponentChildren;
+  /** Extra controls at the end of the toolbar (Refresh for Helm). */
+  toolbarExtra?: ComponentChildren;
+  /** A line above the table, such as a refresh error that did not empty the list. */
+  notice?: ComponentChildren;
 }
+
+export interface DrawerArgs {
+  object: Obj;
+  /** The object disappeared from the list while it was open; `object` is the last copy. */
+  gone: boolean;
+  onClose: () => void;
+  rail: boolean;
+  now: number;
+}
+
+const HELM_INFO = { kind: 'Release', group: 'helm.sh', namespaced: true };
 
 const RAIL_MAX = 300;
 const DRAWER_MIN = 320;
@@ -31,15 +54,16 @@ const DRAWER_MAX = 760;
 
 const badgeTone = (tone: Tone): 'success' | 'warning' | 'error' | 'info' | 'neutral' => (tone === 'muted' ? 'neutral' : tone);
 
-export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLive, onOpenLogs, onOpenConsole }: Props) => {
-  const watch = useWatch({ context, namespace, kind, dir });
+export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLive, onOpenLogs, onOpenConsole, source, view: customView, watchKind, renderDrawer, toolbarExtra, notice }: Props) => {
+  const ownWatch = useWatch(source ? null : { context, namespace, kind: watchKind ?? kind, dir });
+  const watch = source ?? ownWatch;
   // Nodes and pods show usage from metrics-server next to their numbers.
   const wantsUsage = kind === 'Node' || kind === 'Pod';
   const usageView = useUsage({ context, dir, namespace: kind === 'Pod' ? namespace : '_all', nodes: kind === 'Node', pods: kind === 'Pod', disk: kind === 'Node', enabled: wantsUsage });
   const ctx = useMemo<ViewContext | undefined>(() => (wantsUsage ? { usage: usageView.usage } : undefined), [wantsUsage, usageView.usage]);
   const fallback = findKind(kind);
-  const info: Pick<KindInfo, 'kind' | 'group' | 'namespaced'> = watch.info ?? fallback ?? { kind, group: '', namespaced: true };
-  const view = viewFor(info);
+  const info: Pick<KindInfo, 'kind' | 'group' | 'namespaced'> = source ? HELM_INFO : (watch.info ?? fallback ?? { kind, group: '', namespaced: true });
+  const view = customView ?? viewFor(info);
   const [sort, setSort] = useState<SortState>(view.sort);
   const [query, setQuery] = useState('');
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -120,7 +144,9 @@ export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLi
   }
 
   const count = watch.phase === 'ready' ? (query.trim() ? `${rows.length} of ${watch.items.length}` : String(watch.items.length)) : '';
-  const drawer = open ? (
+  const drawer = open && renderDrawer ? (
+    renderDrawer({ object: open, gone: Boolean(selectedKey) && !live, onClose: close, rail: layout === 'rail', now })
+  ) : open ? (
     <Drawer
       object={open}
       gone={Boolean(selectedKey) && !live}
@@ -146,7 +172,9 @@ export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLi
           <SearchField value={query} onChange={setQuery} placeholder={`Search ${view.title.toLowerCase()}`} />
           {count ? <span class="sui-muted sui-small">{`${count} ${view.title.toLowerCase()}`}</span> : null}
           {wantsUsage && watch.phase === 'ready' ? <UsageBar view={usageView} /> : null}
+          {toolbarExtra}
         </div>
+        {notice}
         <div class="k8s-scroll">{body}</div>
       </div>
     );
@@ -160,7 +188,9 @@ export const ResourceView = ({ context, namespace, kind, dir, layout, lead, onLi
           {count ? <span class="sui-muted sui-small">{count}</span> : null}
           {wantsUsage && watch.phase === 'ready' ? <UsageBar view={usageView} /> : null}
           <span class="k8s-push k8s-search"><SearchField value={query} onChange={setQuery} placeholder={`Search ${view.title.toLowerCase()}`} /></span>
+          {toolbarExtra}
         </div>
+        {notice}
         <div class="k8s-scroll k8s-scroll--table">{body}</div>
       </div>
       {drawer ? (

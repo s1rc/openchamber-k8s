@@ -164,7 +164,7 @@ export const summarize = (kind: string, objects: Obj[]): WorkloadSummary => {
   const view = viewFor({ kind, group: kind === 'Pod' ? '' : kind === 'Job' || kind === 'CronJob' ? 'batch' : 'apps', namespaced: true });
   const statusOf = kind === 'Pod' ? podStatus : kind === 'ReplicaSet' ? replicaSetStatus : view.status;
   for (const object of objects) {
-    const tone = statusOf ? statusOf(object).tone : 'success';
+    const tone = statusOf?.(object)?.tone ?? 'success';
     counts.set(tone, (counts.get(tone) ?? 0) + 1);
   }
   const words = kind === 'Pod' ? POD_WORDS : WORDS;

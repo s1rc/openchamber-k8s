@@ -1,15 +1,17 @@
-import { NAV } from '../shared/kinds.ts';
+import type { NavSection } from '../shared/kinds.ts';
 import { List } from './kit.tsx';
 
 interface Props {
+  /** The fixed entries plus the cluster's custom resources and GitOps sections. */
+  nav: NavSection[];
   kind: string;
   onPick: (kind: string) => void;
 }
 
 /** The left navigation of the page layout, in Lens order. */
-export const Nav = ({ kind, onPick }: Props) => (
+export const Nav = ({ nav, kind, onPick }: Props) => (
   <nav class="k8s-nav" aria-label="Resources">
-    {NAV.map((section) => {
+    {nav.map((section) => {
       const has = section.items.some((item) => item.kind === kind);
       return (
         <div class="k8s-nav-group" key={`${section.id}:${has ? kind : ''}`}>

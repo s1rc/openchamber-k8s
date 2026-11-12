@@ -92,7 +92,8 @@ export const actionsFor = (object: Obj): ActionSpec[] => {
 
   if (isFlux(object)) {
     add('reconcile', 'Reconcile', { groupStart: items.length > 0 });
-    add('toggle-suspend', /Kustomization|HelmRelease/.test(kind) ? (suspended(object) ? 'Resume' : 'Suspend') : 'Suspend');
+    // Every Flux kind (the sources too) has spec.suspend, so every one shows its own state.
+    add('toggle-suspend', suspended(object) ? 'Resume' : 'Suspend');
   }
   if (isArgoApplication(object)) {
     add('refresh', 'Refresh', { groupStart: items.length > 0 });

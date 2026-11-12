@@ -45,6 +45,16 @@ const Cell = ({ column, object, view, now, ctx }: { column: Column; object: Obj;
       </span>
     );
   }
+  if (column.cell === 'tone') {
+    const value = cellText(column, object, now);
+    const tone = column.tone?.(object) ?? null;
+    return (
+      <span class="k8s-status" title={value}>
+        {tone && value ? <Dot tone={tone} /> : null}
+        <span class="k8s-ellipsis">{value}</span>
+      </span>
+    );
+  }
   if (column.cell === 'containers') {
     const states = containerStates(object);
     return (

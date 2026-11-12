@@ -38,6 +38,22 @@ describe('actionsFor', () => {
     expect(ids(configMap)).toEqual(['copy-name', 'copy-yaml', 'edit', 'delete']);
   });
 
+  test('every Flux kind offers Resume when it is suspended and Suspend when it is not', () => {
+    for (const [group, kind] of [['kustomize', 'Kustomization'], ['helm', 'HelmRelease'], ['source', 'GitRepository'], ['source', 'HelmRepository'], ['source', 'OCIRepository']]) {
+      const object: Obj = { apiVersion: `${group}.toolkit.fluxcd.io/v1`, kind, metadata: { name: 'x' }, spec: {} };
+      expect(actionsFor(object).find((action) => action.id === 'toggle-suspend')!.label).toBe('Suspend');
+      expect(actionsFor({ ...object, spec: { suspend: true } }).find((action) => action.id === 'toggle-suspend')!.label).toBe('Resume');
+      expect(actionsFor(object).map((action) => action.id)).toContain('reconcile');
+    }
+  });
+
+  test('Argo CD Applications offer Refresh and Sync, ApplicationSets and AppProjects do not', () => {
+    for (const kind of ['ApplicationSet', 'AppProject']) {
+      expect(ids({ apiVersion: 'argoproj.io/v1alpha1', kind, metadata: { name: 'x' } })).not.toContain('sync');
+    }
+    expect(ids({ apiVersion: 'argoproj.io/v1alpha1', kind: 'Application', metadata: { name: 'x' } })).toEqual(expect.arrayContaining(['refresh', 'sync']));
+  });
+
   test('Flux and Argo actions appear only for their own resources', () => {
     expect(isFlux(flux)).toBe(true);
     expect(ids(flux)).toContain('reconcile');

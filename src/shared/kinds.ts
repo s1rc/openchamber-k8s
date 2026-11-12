@@ -1,6 +1,7 @@
 // Kind registry. The first half holds API paths (used by the service); the second half holds what the panel shows
 // for each kind: columns, status, sorting and overview details. Actions arrive in Phase 3.
 import { ageText, bytesText, coresText, cpuText, parseQuantity } from './format.ts';
+import { HELM_RELEASES } from './helm.ts';
 import { podUsageKey, type UsageSet } from './metrics.ts';
 import type { Obj } from './types.ts';
 
@@ -102,7 +103,7 @@ export interface StatusInfo {
 }
 
 /** How the table draws a cell. `age` cells hold a time in ms and show `3d4h`; `status` cells use the view's status function. */
-export type CellKind = 'text' | 'mono' | 'age' | 'status' | 'containers' | 'meter';
+export type CellKind = 'text' | 'mono' | 'age' | 'status' | 'containers' | 'meter' | 'tone';
 
 /** What a column may need besides the object: the live numbers from metrics-server. */
 export interface ViewContext {
@@ -124,6 +125,8 @@ export interface Column {
   sort?: (object: Obj, ctx?: ViewContext) => string | number | null;
   /** For `meter` cells: the bar under the text. Null draws the text alone. */
   meter?: (object: Obj, ctx?: ViewContext) => Meter | null;
+  /** For `tone` cells: the dot before the text. Null draws the text alone. */
+  tone?: (object: Obj) => Tone | null;
   cell?: CellKind;
   /** A CSS grid track, e.g. `minmax(120px, 1fr)`. */
   width?: string;
@@ -134,7 +137,7 @@ export interface Column {
 export interface KindView {
   title: string;
   columns: Column[];
-  status?: (object: Obj) => StatusInfo;
+  status?: (object: Obj) => StatusInfo | null;
   sort: { column: string; dir: 'asc' | 'desc' };
   /** The one column shown next to the name in the narrow list. Defaults to Age. */
   railColumn?: string;
@@ -720,9 +723,12 @@ const item = (kind: string): NavItem => ({ kind, title: VIEWS[kind]?.title ?? `$
 export const CLUSTER_OVERVIEW = 'ClusterOverview';
 export const WORKLOADS_OVERVIEW = 'WorkloadsOverview';
 export const OVERVIEW_KINDS: ReadonlySet<string> = new Set([CLUSTER_OVERVIEW, WORKLOADS_OVERVIEW]);
-export const SPECIAL_KINDS: ReadonlySet<string> = new Set([CLUSTER_OVERVIEW, WORKLOADS_OVERVIEW, 'PortForwards']);
+export const SPECIAL_KINDS: ReadonlySet<string> = new Set([CLUSTER_OVERVIEW, WORKLOADS_OVERVIEW, 'PortForwards', HELM_RELEASES]);
 
-/** Lens order. Helm and GitOps join in a later phase. */
+/**
+ * Lens order. The entries here are fixed; `buildNav` in crds.ts adds the cluster's own custom resources after
+ * Definitions and the GitOps sections (Flux, Argo CD) before Port forwarding, when their CRDs exist.
+ */
 export const NAV: NavSection[] = [
   { id: 'cluster', title: 'Cluster', heading: true, items: [{ kind: CLUSTER_OVERVIEW, title: 'Overview' }] },
   { id: 'nodes', title: 'Nodes', items: [item('Node')] },
@@ -740,6 +746,7 @@ export const NAV: NavSection[] = [
   { id: 'storage', title: 'Storage', items: ['PersistentVolumeClaim', 'PersistentVolume', 'StorageClass'].map(item) },
   { id: 'namespaces', title: 'Namespaces', items: [item('Namespace')] },
   { id: 'events', title: 'Events', items: [item('Event')] },
+  { id: 'helm', title: 'Helm', heading: true, items: [{ kind: HELM_RELEASES, title: 'Releases' }] },
   { id: 'access', title: 'Access control', items: ['ServiceAccount', 'ClusterRole', 'Role', 'ClusterRoleBinding', 'RoleBinding'].map(item) },
   { id: 'crds', title: 'Custom resources', items: [item('CustomResourceDefinition')] },
   { id: 'forwards', title: 'Port forwarding', items: [{ kind: 'PortForwards', title: 'Port forwarding' }] },
@@ -756,3 +763,6 @@ export const navLabel = (kind: string): { section: string; title: string } | nul
   return null;
 };
 
+
+/** The small builders the registry uses, for views defined elsewhere (custom resources, GitOps). */
+export const viewHelpers = { col, NAME, NAMESPACE, AGE, st, kv, condition, text, arr, pairs, trueConditions };

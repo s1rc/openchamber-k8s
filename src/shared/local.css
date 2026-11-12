@@ -226,3 +226,14 @@ body { font-family: var(--oc-font, system-ui, sans-serif); font-size: 13px; }
 .k8s-grid-line { stroke: var(--oc-border); stroke-width: 1; }
 .k8s-axis { fill: var(--oc-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .k8s-hover-line { stroke: var(--oc-muted); stroke-width: 1; stroke-dasharray: 3 3; }
+
+/* Helm changes: the objects a rollback or upgrade would change, and where the chart comes from */
+.k8s-diff-line--skip { color: var(--oc-muted); font-style: italic; }
+.k8s-manifest-diff .k8s-details { margin: 0; }
+.k8s-manifest-diff summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.k8s-diff-names { display: flex; flex-direction: column; gap: 4px; }
+.k8s-diff-chip--add { color: var(--oc-success-text, var(--oc-success)); }
+.k8s-diff-chip--del { color: var(--oc-error-text, var(--oc-error)); }
+.k8s-chart-source { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.k8s-chart-custom { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 8px; }
+.k8s-editor--short textarea { min-height: 220px; }

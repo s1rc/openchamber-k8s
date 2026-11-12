@@ -7573,6 +7573,121 @@ var cpuText = (cores) => {
   return cores < 1 ? `${Math.round(cores * 1000)}m` : String(Number(cores.toFixed(2)));
 };
 
+// src/shared/helm.ts
+var HELM_RELEASES = "HelmReleases";
+var text = (value) => value === undefined || value === null ? "" : String(value);
+var splitChart = (chart) => {
+  const match = /^(.+?)-(v?\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.+-]*)?)$/.exec(chart);
+  return match ? { name: match[1], version: match[2] } : { name: chart, version: "" };
+};
+var isoOrNull = (value) => {
+  if (typeof value !== "string")
+    return null;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? new Date(at).toISOString() : null;
+};
+var parseHelmList = (output) => {
+  let parsed;
+  try {
+    parsed = JSON.parse(output || "[]");
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed))
+    return [];
+  const releases = [];
+  for (const entry of parsed) {
+    const name = text(entry?.name);
+    const namespace = text(entry?.namespace);
+    const revision = Number(entry?.revision);
+    if (!name || !namespace || !Number.isInteger(revision))
+      continue;
+    const chart = text(entry.chart);
+    const { name: chartName, version: chartVersion } = splitChart(chart);
+    releases.push({ name, namespace, chart, chartName, chartVersion, revision, appVersion: text(entry.app_version), status: text(entry.status) || "unknown", updated: isoOrNull(entry.updated) });
+  }
+  return releases;
+};
+var parseHelmHistory = (output) => {
+  let parsed;
+  try {
+    parsed = JSON.parse(output || "[]");
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed))
+    return [];
+  return parsed.map((entry) => {
+    const revision = Number(entry?.revision);
+    if (!Number.isInteger(revision))
+      return null;
+    return { revision, updated: isoOrNull(entry.updated), status: text(entry.status) || "unknown", chart: text(entry.chart), appVersion: text(entry.app_version), description: text(entry.description) };
+  }).filter((entry) => entry !== null).sort((a, b) => b.revision - a.revision);
+};
+var helmStatus = (status) => {
+  switch (status) {
+    case "deployed":
+      return { label: "Deployed", tone: "success" };
+    case "failed":
+      return { label: "Failed", tone: "error" };
+    case "superseded":
+      return { label: "Superseded", tone: "muted" };
+    case "uninstalled":
+      return { label: "Uninstalled", tone: "muted" };
+    case "uninstalling":
+      return { label: "Uninstalling", tone: "warning" };
+    case "pending-install":
+    case "pending-upgrade":
+    case "pending-rollback":
+      return { label: status.replace("pending-", "Pending "), tone: "info" };
+    default:
+      return { label: status ? status[0].toUpperCase() + status.slice(1) : "Unknown", tone: "muted" };
+  }
+};
+var DNS_NAME = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
+var DNS_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+var validReleaseName = (name) => name.length > 0 && name.length <= 53 && DNS_NAME.test(name);
+var validNamespaceName = (name) => name.length > 0 && name.length <= 63 && DNS_LABEL.test(name);
+var validChartVersion = (version) => version.length > 0 && version.length <= 64 && /^[0-9A-Za-z][0-9A-Za-z.+_~-]*$/.test(version);
+var validRevision = (revision) => Number.isInteger(revision) && revision >= 1 && revision <= 1e6;
+var validChartRef = (ref) => ref.length <= 300 && (/^oci:\/\/[A-Za-z0-9][A-Za-z0-9._~/:@-]*$/.test(ref) || /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(ref));
+var safeChartPath = (path) => path.length > 0 && path.length < 300 && !path.startsWith("/") && !path.includes("\x00") && !path.includes("\\") && path.split("/").every((part) => part !== "" && part !== "." && part !== "..");
+var repoCandidates = (chartName, chartVersion, searches) => {
+  if (!chartName || !chartVersion)
+    return [];
+  const out = [];
+  for (const search of [...searches].sort((a, b) => a.repo.localeCompare(b.repo))) {
+    const ref = `${search.repo}/${chartName}`;
+    if (search.results.some((row) => text(row.name) === ref && text(row.version).replace(/^v/, "") === chartVersion.replace(/^v/, "")))
+      out.push({ ref, version: chartVersion });
+  }
+  return out;
+};
+var col = (id, label, get, extra = {}) => ({ id, label, get, ...extra });
+var release = (object) => object.helm;
+var releaseStatus = (object) => helmStatus(release(object)?.status ?? "");
+var HELM_VIEW = {
+  title: "Releases",
+  columns: [
+    col("name", "Name", (o) => text(o.metadata?.name), { width: "minmax(150px, 2fr)" }),
+    col("namespace", "Namespace", (o) => text(o.metadata?.namespace), { width: "minmax(100px, 1fr)" }),
+    col("chart", "Chart", (o) => release(o)?.chartName ?? "", { width: "minmax(130px, 1.6fr)" }),
+    col("revision", "Revision", (o) => release(o)?.revision ?? null, { width: "80px", align: "end" }),
+    col("version", "Version", (o) => release(o)?.chartVersion ?? "", { width: "minmax(80px, 1fr)" }),
+    col("appVersion", "App version", (o) => release(o)?.appVersion ?? "", { width: "minmax(90px, 1fr)" }),
+    col("status", "Status", (o) => releaseStatus(o).label, { cell: "status", width: "minmax(100px, 1fr)" }),
+    col("updated", "Updated", (o) => release(o)?.updated ? Date.parse(release(o).updated) : null, { cell: "age", width: "72px", align: "end", hint: "Time since the last revision" })
+  ],
+  sort: { column: "name", dir: "asc" },
+  railColumn: "chart",
+  status: releaseStatus,
+  details: (o) => [
+    ["Chart", release(o)?.chart ?? ""],
+    ["Revision", String(release(o)?.revision ?? "")],
+    ["App version", release(o)?.appVersion ?? ""]
+  ].filter((row) => row[1] !== "")
+};
+
 // src/shared/metrics.ts
 var podUsageKey = (namespace, name) => `${namespace}/${name}`;
 var num = (value) => parseQuantity(value);
@@ -7685,7 +7800,7 @@ var SCALABLE = new Set(["Deployment", "StatefulSet", "ReplicaSet"]);
 var RESTARTABLE = new Set(["Deployment", "StatefulSet", "DaemonSet"]);
 var isSecret = (info) => info.kind === "Secret" && info.group === "";
 var arr = (value) => Array.isArray(value) ? value : [];
-var text = (value) => value === undefined || value === null ? "" : String(value);
+var text2 = (value) => value === undefined || value === null ? "" : String(value);
 var count = (value) => typeof value === "number" && Number.isFinite(value) ? value : 0;
 var keysOf = (value) => value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value) : [];
 var timeOf2 = (value) => {
@@ -7694,17 +7809,17 @@ var timeOf2 = (value) => {
   const at = Date.parse(value);
   return Number.isFinite(at) ? at : null;
 };
-var pairs = (value) => keysOf(value).map((key) => `${key}=${text(value[key])}`).join(", ");
+var pairs = (value) => keysOf(value).map((key) => `${key}=${text2(value[key])}`).join(", ");
 var more = (items, shown = 3) => items.length > shown ? `${items.slice(0, shown).join(", ")} (+${items.length - shown})` : items.join(", ");
-var trueConditions = (object) => arr(object.status?.conditions).filter((c) => c.status === "True").map((c) => text(c.type));
+var trueConditions = (object) => arr(object.status?.conditions).filter((c) => c.status === "True").map((c) => text2(c.type));
 var condition = (object, type) => arr(object.status?.conditions).find((c) => c.type === type);
 var owner = (object) => arr(object.metadata?.ownerReferences).find((r) => r.controller) ?? arr(object.metadata?.ownerReferences)[0];
 var ratio = (ready, desired) => `${count(ready)}/${count(desired)}`;
 var st = (label, tone) => ({ label, tone });
-var kv = (...rows) => rows.map(([key, value]) => [key, text(value)]).filter(([, value]) => value !== "");
+var kv = (...rows) => rows.map(([key, value]) => [key, text2(value)]).filter(([, value]) => value !== "");
 var podReason = (pod) => {
   const status = pod.status ?? {};
-  let reason = text(status.reason) || text(status.phase) || "Unknown";
+  let reason = text2(status.reason) || text2(status.phase) || "Unknown";
   const inits = arr(status.initContainerStatuses);
   let initializing = false;
   for (let i = 0;i < inits.length; i += 1) {
@@ -7798,7 +7913,7 @@ var nodeRoles = (node) => {
   const roles = keysOf(node.metadata?.labels).filter((key) => key.startsWith(prefix)).map((key) => key.slice(prefix.length) || "worker");
   const legacy = node.metadata?.labels?.["kubernetes.io/role"];
   if (legacy && !roles.includes(legacy))
-    roles.push(text(legacy));
+    roles.push(text2(legacy));
   return roles.join(", ");
 };
 var nodeStatus = (node) => {
@@ -7810,9 +7925,9 @@ var nodeStatus = (node) => {
   const pressure = ["MemoryPressure", "DiskPressure", "PIDPressure", "NetworkUnavailable"].filter((type) => condition(node, type)?.status === "True");
   return pressure.length > 0 ? st(pressure.join(", "), "warning") : st("Ready", "success");
 };
-var nodeAddress = (node, type) => text(arr(node.status?.addresses).find((a) => a.type === type)?.address);
-var nodeUse = (node, ctx) => ctx?.usage?.nodes.get(text(node.metadata?.name));
-var podUse = (pod, ctx) => ctx?.usage?.pods.get(podUsageKey(text(pod.metadata?.namespace), text(pod.metadata?.name)));
+var nodeAddress = (node, type) => text2(arr(node.status?.addresses).find((a) => a.type === type)?.address);
+var nodeUse = (node, ctx) => ctx?.usage?.nodes.get(text2(node.metadata?.name));
+var podUse = (pod, ctx) => ctx?.usage?.pods.get(podUsageKey(text2(pod.metadata?.namespace), text2(pod.metadata?.name)));
 var nodeCell = (node, ctx, what) => {
   const meter = nodeMeter(node, ctx, what);
   if (meter)
@@ -7836,62 +7951,62 @@ var nodeMeter = (node, ctx, what) => {
     return null;
   return what === "cpu" ? { text: `${coresText(used)} / ${coresText(size)}`, fraction: used / size } : { text: `${bytesText(used)} / ${bytesText(size)}`, fraction: used / size };
 };
-var servicePorts = (service) => arr(service.spec?.ports).map((p) => `${text(p.port)}${p.nodePort ? `:${text(p.nodePort)}` : ""}/${text(p.protocol) || "TCP"}`).join(", ");
-var loadBalancers = (object) => arr(object.status?.loadBalancer?.ingress).map((i) => text(i.hostname || i.ip)).filter(Boolean);
+var servicePorts = (service) => arr(service.spec?.ports).map((p) => `${text2(p.port)}${p.nodePort ? `:${text2(p.nodePort)}` : ""}/${text2(p.protocol) || "TCP"}`).join(", ");
+var loadBalancers = (object) => arr(object.status?.loadBalancer?.ingress).map((i) => text2(i.hostname || i.ip)).filter(Boolean);
 var externalIp = (service) => {
   const list = [...loadBalancers(service), ...Array.isArray(service.spec?.externalIPs) ? service.spec.externalIPs : []];
   if (list.length === 0 && service.spec?.type === "ExternalName")
-    return text(service.spec.externalName);
+    return text2(service.spec.externalName);
   return more(list, 2);
 };
 var endpointsText = (endpoints) => {
   const list = [];
   for (const subset of arr(endpoints.subsets)) {
-    const ports = arr(subset.ports).map((p) => text(p.port));
+    const ports = arr(subset.ports).map((p) => text2(p.port));
     for (const address of arr(subset.addresses))
-      list.push(ports.length > 0 ? `${text(address.ip)}:${ports[0]}` : text(address.ip));
+      list.push(ports.length > 0 ? `${text2(address.ip)}:${ports[0]}` : text2(address.ip));
   }
   return more(list);
 };
 var quantityValue = (value) => parseQuantity(value);
-var pvcSize = (pvc) => text(pvc.status?.capacity?.storage ?? pvc.spec?.resources?.requests?.storage);
+var pvcSize = (pvc) => text2(pvc.status?.capacity?.storage ?? pvc.spec?.resources?.requests?.storage);
 var isDefaultClass = (storageClass) => storageClass.metadata?.annotations?.["storageclass.kubernetes.io/is-default-class"] === "true" || storageClass.metadata?.annotations?.["storageclass.beta.kubernetes.io/is-default-class"] === "true";
 var hpaMetrics = (hpa) => {
   const parts = arr(hpa.spec?.metrics).map((metric) => {
     if (metric.type !== "Resource" || !metric.resource)
-      return text(metric.type);
-    const name = text(metric.resource.name);
-    const target = metric.resource.target?.averageUtilization !== undefined ? `${text(metric.resource.target.averageUtilization)}%` : text(metric.resource.target?.averageValue ?? metric.resource.target?.value);
+      return text2(metric.type);
+    const name = text2(metric.resource.name);
+    const target = metric.resource.target?.averageUtilization !== undefined ? `${text2(metric.resource.target.averageUtilization)}%` : text2(metric.resource.target?.averageValue ?? metric.resource.target?.value);
     const current = arr(hpa.status?.currentMetrics).find((c) => c.type === "Resource" && c.resource?.name === name)?.resource?.current;
-    const now = current?.averageUtilization !== undefined ? `${text(current.averageUtilization)}%` : text(current?.averageValue ?? current?.value) || "<unknown>";
+    const now = current?.averageUtilization !== undefined ? `${text2(current.averageUtilization)}%` : text2(current?.averageValue ?? current?.value) || "<unknown>";
     return `${name} ${now}/${target}`;
   });
   return more(parts, 2);
 };
-var subjects = (binding) => more(arr(binding.subjects).map((s) => `${text(s.kind)}:${text(s.name)}`), 2);
+var subjects = (binding) => more(arr(binding.subjects).map((s) => `${text2(s.kind)}:${text2(s.name)}`), 2);
 var eventTime = (event) => timeOf2(event.lastTimestamp) ?? timeOf2(event.series?.lastObservedTime) ?? timeOf2(event.eventTime) ?? timeOf2(event.firstTimestamp) ?? timeOf2(event.metadata?.creationTimestamp);
 var involved = (event) => {
   const ref = event.involvedObject ?? event.regarding;
-  return ref ? `${text(ref.kind)}/${text(ref.name)}` : "";
+  return ref ? `${text2(ref.kind)}/${text2(ref.name)}` : "";
 };
-var col = (id, label, get, extra = {}) => ({ id, label, get, ...extra });
-var NAME = col("name", "Name", (o) => text(o.metadata?.name), { width: "minmax(150px, 2.4fr)" });
-var NAMESPACE = col("namespace", "Namespace", (o) => text(o.metadata?.namespace), { width: "minmax(90px, 1fr)" });
-var AGE = col("age", "Age", (o) => timeOf2(o.metadata?.creationTimestamp), { cell: "age", width: "56px", align: "end" });
-var status = (fn, label = "Status") => col("status", label, (o) => fn(o).label, { cell: "status", width: "minmax(90px, 1.1fr)" });
-var num2 = (id, label, get, extra = {}) => col(id, label, get, { width: "64px", align: "end", ...extra });
+var col2 = (id, label, get, extra = {}) => ({ id, label, get, ...extra });
+var NAME = col2("name", "Name", (o) => text2(o.metadata?.name), { width: "minmax(150px, 2.4fr)" });
+var NAMESPACE = col2("namespace", "Namespace", (o) => text2(o.metadata?.namespace), { width: "minmax(90px, 1fr)" });
+var AGE = col2("age", "Age", (o) => timeOf2(o.metadata?.creationTimestamp), { cell: "age", width: "56px", align: "end" });
+var status = (fn, label = "Status") => col2("status", label, (o) => fn(o).label, { cell: "status", width: "minmax(90px, 1.1fr)" });
+var num2 = (id, label, get, extra = {}) => col2(id, label, get, { width: "64px", align: "end", ...extra });
 var view = (title, columns, extra = {}) => ({ title, columns, sort: { column: "name", dir: "asc" }, ...extra });
 var VIEWS = {
   Pod: view("Pods", [
     NAME,
     NAMESPACE,
-    col("containers", "Containers", (o) => arr(o.spec?.containers).length, { cell: "containers", width: "88px" }),
+    col2("containers", "Containers", (o) => arr(o.spec?.containers).length, { cell: "containers", width: "88px" }),
     num2("cpu", "CPU", (o, ctx) => cpuText(podUse(o, ctx)?.cpu), { sort: (o, ctx) => podUse(o, ctx)?.cpu ?? null, hint: "Current usage from metrics-server" }),
     num2("memory", "Memory", (o, ctx) => bytesText(podUse(o, ctx)?.memory), { sort: (o, ctx) => podUse(o, ctx)?.memory ?? null, width: "84px", hint: "Current usage from metrics-server" }),
     num2("restarts", "Restarts", (o) => restarts(o)),
-    col("controlledBy", "Controlled by", (o) => text(owner(o)?.kind), { width: "minmax(80px, 1fr)" }),
-    col("node", "Node", (o) => text(o.spec?.nodeName), { width: "minmax(110px, 1.5fr)" }),
-    col("qos", "QoS", (o) => text(o.status?.qosClass), { width: "80px" }),
+    col2("controlledBy", "Controlled by", (o) => text2(owner(o)?.kind), { width: "minmax(80px, 1fr)" }),
+    col2("node", "Node", (o) => text2(o.spec?.nodeName), { width: "minmax(110px, 1.5fr)" }),
+    col2("qos", "QoS", (o) => text2(o.status?.qosClass), { width: "80px" }),
     AGE,
     status(podStatus)
   ], {
@@ -7923,8 +8038,8 @@ var VIEWS = {
       hint: "Root disk used of its size (read from the kubelet). Allocatable only when that is not readable."
     }),
     num2("taints", "Taints", (o) => arr(o.spec?.taints).length),
-    col("roles", "Roles", (o) => nodeRoles(o), { width: "minmax(80px, 1fr)" }),
-    col("version", "Version", (o) => text(o.status?.nodeInfo?.kubeletVersion), { width: "minmax(130px, 1fr)" }),
+    col2("roles", "Roles", (o) => nodeRoles(o), { width: "minmax(80px, 1fr)" }),
+    col2("version", "Version", (o) => text2(o.status?.nodeInfo?.kubeletVersion), { width: "minmax(130px, 1fr)" }),
     AGE,
     status(nodeStatus, "Conditions")
   ], {
@@ -7932,7 +8047,7 @@ var VIEWS = {
     railColumn: "cpu",
     details: (o) => {
       const info = o.status?.nodeInfo ?? {};
-      return kv(["Roles", nodeRoles(o)], ["Kubelet", info.kubeletVersion], ["OS image", info.osImage], ["Kernel", info.kernelVersion], ["Container runtime", info.containerRuntimeVersion], ["Architecture", info.architecture], ["Internal IP", nodeAddress(o, "InternalIP")], ["External IP", nodeAddress(o, "ExternalIP")], ["Hostname", nodeAddress(o, "Hostname")], ["Provider ID", o.spec?.providerID], ["CPU", `${text(o.status?.allocatable?.cpu)} allocatable of ${text(o.status?.capacity?.cpu)}`], ["Memory", `${bytesText(quantityValue(o.status?.allocatable?.memory))} allocatable of ${bytesText(quantityValue(o.status?.capacity?.memory))}`], ["Pods", `${text(o.status?.allocatable?.pods)} allocatable`], ["Taints", arr(o.spec?.taints).map((t) => `${text(t.key)}${t.value ? `=${text(t.value)}` : ""}:${text(t.effect)}`).join(", ")]);
+      return kv(["Roles", nodeRoles(o)], ["Kubelet", info.kubeletVersion], ["OS image", info.osImage], ["Kernel", info.kernelVersion], ["Container runtime", info.containerRuntimeVersion], ["Architecture", info.architecture], ["Internal IP", nodeAddress(o, "InternalIP")], ["External IP", nodeAddress(o, "ExternalIP")], ["Hostname", nodeAddress(o, "Hostname")], ["Provider ID", o.spec?.providerID], ["CPU", `${text2(o.status?.allocatable?.cpu)} allocatable of ${text2(o.status?.capacity?.cpu)}`], ["Memory", `${bytesText(quantityValue(o.status?.allocatable?.memory))} allocatable of ${bytesText(quantityValue(o.status?.capacity?.memory))}`], ["Pods", `${text2(o.status?.allocatable?.pods)} allocatable`], ["Taints", arr(o.spec?.taints).map((t) => `${text2(t.key)}${t.value ? `=${text2(t.value)}` : ""}:${text2(t.effect)}`).join(", ")]);
     }
   }),
   Deployment: view("Deployments", [
@@ -7941,14 +8056,14 @@ var VIEWS = {
     num2("pods", "Pods", (o) => ratio(o.status?.readyReplicas, o.spec?.replicas ?? 1), { sort: (o) => count(o.status?.readyReplicas), width: "80px" }),
     num2("replicas", "Replicas", (o) => count(o.spec?.replicas ?? 1)),
     AGE,
-    col("conditions", "Conditions", (o) => trueConditions(o).join(", "), { width: "minmax(120px, 1.4fr)" }),
+    col2("conditions", "Conditions", (o) => trueConditions(o).join(", "), { width: "minmax(120px, 1.4fr)" }),
     status(workloadStatus("Deployment"))
   ], {
     status: workloadStatus("Deployment"),
     railColumn: "pods",
     details: (o) => kv(["Replicas", `${count(o.status?.readyReplicas)} ready of ${count(o.spec?.replicas ?? 1)} desired, ${count(o.status?.updatedReplicas)} updated, ${count(o.status?.availableReplicas)} available`], ["Strategy", o.spec?.strategy?.type], ["Selector", pairs(o.spec?.selector?.matchLabels)], ["Paused", o.spec?.paused ? "Yes" : ""])
   }),
-  DaemonSet: view("DaemonSets", [NAME, NAMESPACE, num2("pods", "Pods", (o) => ratio(o.status?.numberReady, o.status?.desiredNumberScheduled), { width: "80px" }), col("selector", "Node selector", (o) => pairs(o.spec?.template?.spec?.nodeSelector), { width: "minmax(120px, 1.4fr)" }), AGE, status(workloadStatus("DaemonSet"))], {
+  DaemonSet: view("DaemonSets", [NAME, NAMESPACE, num2("pods", "Pods", (o) => ratio(o.status?.numberReady, o.status?.desiredNumberScheduled), { width: "80px" }), col2("selector", "Node selector", (o) => pairs(o.spec?.template?.spec?.nodeSelector), { width: "minmax(120px, 1.4fr)" }), AGE, status(workloadStatus("DaemonSet"))], {
     status: workloadStatus("DaemonSet"),
     railColumn: "pods",
     details: (o) => kv(["Scheduled", `${count(o.status?.currentNumberScheduled)} of ${count(o.status?.desiredNumberScheduled)}`], ["Ready", count(o.status?.numberReady)], ["Selector", pairs(o.spec?.selector?.matchLabels)], ["Update strategy", o.spec?.updateStrategy?.type])
@@ -7958,12 +8073,12 @@ var VIEWS = {
     railColumn: "pods",
     details: (o) => kv(["Replicas", `${count(o.status?.readyReplicas)} ready of ${count(o.spec?.replicas ?? 1)}`], ["Service", o.spec?.serviceName], ["Selector", pairs(o.spec?.selector?.matchLabels)], ["Update strategy", o.spec?.updateStrategy?.type])
   }),
-  ReplicaSet: view("ReplicaSets", [NAME, NAMESPACE, num2("desired", "Desired", (o) => count(o.spec?.replicas ?? 1)), num2("current", "Current", (o) => count(o.status?.replicas)), num2("ready", "Ready", (o) => count(o.status?.readyReplicas)), col("controlledBy", "Controlled by", (o) => owner(o) ? `${text(owner(o).kind)}/${text(owner(o).name)}` : "", { width: "minmax(140px, 1.5fr)" }), AGE], { railColumn: "ready" }),
+  ReplicaSet: view("ReplicaSets", [NAME, NAMESPACE, num2("desired", "Desired", (o) => count(o.spec?.replicas ?? 1)), num2("current", "Current", (o) => count(o.status?.replicas)), num2("ready", "Ready", (o) => count(o.status?.readyReplicas)), col2("controlledBy", "Controlled by", (o) => owner(o) ? `${text2(owner(o).kind)}/${text2(owner(o).name)}` : "", { width: "minmax(140px, 1.5fr)" }), AGE], { railColumn: "ready" }),
   Job: view("Jobs", [
     NAME,
     NAMESPACE,
     num2("completions", "Completions", (o) => `${count(o.status?.succeeded)}/${count(o.spec?.completions ?? 1)}`, { width: "100px" }),
-    col("conditions", "Conditions", (o) => trueConditions(o).join(", "), { width: "minmax(100px, 1fr)" }),
+    col2("conditions", "Conditions", (o) => trueConditions(o).join(", "), { width: "minmax(100px, 1fr)" }),
     AGE,
     status(jobStatus)
   ], {
@@ -7974,10 +8089,10 @@ var VIEWS = {
   CronJob: view("CronJobs", [
     NAME,
     NAMESPACE,
-    col("schedule", "Schedule", (o) => text(o.spec?.schedule), { cell: "mono", width: "minmax(110px, 1fr)" }),
-    col("suspend", "Suspend", (o) => o.spec?.suspend ? "Yes" : "No", { width: "80px" }),
+    col2("schedule", "Schedule", (o) => text2(o.spec?.schedule), { cell: "mono", width: "minmax(110px, 1fr)" }),
+    col2("suspend", "Suspend", (o) => o.spec?.suspend ? "Yes" : "No", { width: "80px" }),
     num2("active", "Active", (o) => arr(o.status?.active).length),
-    col("lastSchedule", "Last schedule", (o) => timeOf2(o.status?.lastScheduleTime), { cell: "age", width: "110px", align: "end" }),
+    col2("lastSchedule", "Last schedule", (o) => timeOf2(o.status?.lastScheduleTime), { cell: "age", width: "110px", align: "end" }),
     AGE
   ], {
     railColumn: "schedule",
@@ -7985,13 +8100,13 @@ var VIEWS = {
     details: (o) => kv(["Schedule", o.spec?.schedule], ["Suspended", o.spec?.suspend ? "Yes" : "No"], ["Concurrency", o.spec?.concurrencyPolicy], ["Last schedule", o.status?.lastScheduleTime], ["Last success", o.status?.lastSuccessfulTime])
   }),
   ConfigMap: view("ConfigMaps", [NAME, NAMESPACE, num2("keys", "Keys", (o) => keysOf(o.data).length + keysOf(o.binaryData).length), AGE], { railColumn: "keys", details: (o) => kv(["Keys", [...keysOf(o.data), ...keysOf(o.binaryData)].join(", ")]) }),
-  Secret: view("Secrets", [NAME, NAMESPACE, col("labels", "Labels", (o) => pairs(o.metadata?.labels), { width: "minmax(120px, 1.5fr)" }), num2("keys", "Keys", (o) => keysOf(o.data).length + keysOf(o.stringData).length), col("type", "Type", (o) => text(o.type), { width: "minmax(160px, 1.5fr)" }), AGE], { railColumn: "type", details: (o) => kv(["Type", o.type], ["Keys", [...keysOf(o.data), ...keysOf(o.stringData)].join(", ")]) }),
-  ResourceQuota: view("ResourceQuotas", [NAME, NAMESPACE, num2("resources", "Resources", (o) => keysOf(o.spec?.hard).length), AGE], { details: (o) => kv(...keysOf(o.spec?.hard).map((key) => [key, `${text(o.status?.used?.[key] ?? "0")} used of ${text(o.spec.hard[key])}`])) }),
+  Secret: view("Secrets", [NAME, NAMESPACE, col2("labels", "Labels", (o) => pairs(o.metadata?.labels), { width: "minmax(120px, 1.5fr)" }), num2("keys", "Keys", (o) => keysOf(o.data).length + keysOf(o.stringData).length), col2("type", "Type", (o) => text2(o.type), { width: "minmax(160px, 1.5fr)" }), AGE], { railColumn: "type", details: (o) => kv(["Type", o.type], ["Keys", [...keysOf(o.data), ...keysOf(o.stringData)].join(", ")]) }),
+  ResourceQuota: view("ResourceQuotas", [NAME, NAMESPACE, num2("resources", "Resources", (o) => keysOf(o.spec?.hard).length), AGE], { details: (o) => kv(...keysOf(o.spec?.hard).map((key) => [key, `${text2(o.status?.used?.[key] ?? "0")} used of ${text2(o.spec.hard[key])}`])) }),
   LimitRange: view("LimitRanges", [NAME, NAMESPACE, num2("limits", "Limits", (o) => arr(o.spec?.limits).length), AGE]),
   HorizontalPodAutoscaler: view("HorizontalPodAutoscalers", [
     NAME,
     NAMESPACE,
-    col("metrics", "Metrics", (o) => hpaMetrics(o), { width: "minmax(140px, 1.6fr)" }),
+    col2("metrics", "Metrics", (o) => hpaMetrics(o), { width: "minmax(140px, 1.6fr)" }),
     num2("min", "Min", (o) => count(o.spec?.minReplicas ?? 1)),
     num2("max", "Max", (o) => count(o.spec?.maxReplicas)),
     num2("replicas", "Replicas", (o) => count(o.status?.currentReplicas)),
@@ -8000,22 +8115,22 @@ var VIEWS = {
   ], {
     railColumn: "replicas",
     status: (o) => condition(o, "ScalingActive")?.status === "False" || condition(o, "AbleToScale")?.status === "False" ? st("Not scaling", "warning") : st("Active", "success"),
-    details: (o) => kv(["Target", o.spec?.scaleTargetRef ? `${text(o.spec.scaleTargetRef.kind)}/${text(o.spec.scaleTargetRef.name)}` : ""], ["Metrics", hpaMetrics(o)], ["Replicas", `${count(o.status?.currentReplicas)} current, ${count(o.status?.desiredReplicas)} desired (min ${count(o.spec?.minReplicas ?? 1)}, max ${count(o.spec?.maxReplicas)})`])
+    details: (o) => kv(["Target", o.spec?.scaleTargetRef ? `${text2(o.spec.scaleTargetRef.kind)}/${text2(o.spec.scaleTargetRef.name)}` : ""], ["Metrics", hpaMetrics(o)], ["Replicas", `${count(o.status?.currentReplicas)} current, ${count(o.status?.desiredReplicas)} desired (min ${count(o.spec?.minReplicas ?? 1)}, max ${count(o.spec?.maxReplicas)})`])
   }),
-  PodDisruptionBudget: view("PodDisruptionBudgets", [NAME, NAMESPACE, col("minAvailable", "Min available", (o) => text(o.spec?.minAvailable), { width: "110px" }), col("maxUnavailable", "Max unavailable", (o) => text(o.spec?.maxUnavailable), { width: "120px" }), num2("allowed", "Allowed", (o) => count(o.status?.disruptionsAllowed)), num2("healthy", "Healthy", (o) => ratio(o.status?.currentHealthy, o.status?.desiredHealthy)), AGE], { railColumn: "allowed" }),
-  PriorityClass: view("PriorityClasses", [NAME, num2("value", "Value", (o) => count(o.value), { width: "110px" }), col("default", "Global default", (o) => o.globalDefault ? "Yes" : "No", { width: "110px" }), AGE], { railColumn: "value" }),
-  RuntimeClass: view("RuntimeClasses", [NAME, col("handler", "Handler", (o) => text(o.handler), { width: "minmax(100px, 1fr)" }), AGE], { railColumn: "handler" }),
-  Lease: view("Leases", [NAME, NAMESPACE, col("holder", "Holder", (o) => text(o.spec?.holderIdentity), { width: "minmax(160px, 2fr)" }), col("renewed", "Renewed", (o) => timeOf2(o.spec?.renewTime), { cell: "age", width: "90px", align: "end" }), AGE], { railColumn: "renewed", details: (o) => kv(["Holder", o.spec?.holderIdentity], ["Duration", o.spec?.leaseDurationSeconds ? `${text(o.spec.leaseDurationSeconds)}s` : ""], ["Renewed", o.spec?.renewTime], ["Transitions", o.spec?.leaseTransitions]) }),
+  PodDisruptionBudget: view("PodDisruptionBudgets", [NAME, NAMESPACE, col2("minAvailable", "Min available", (o) => text2(o.spec?.minAvailable), { width: "110px" }), col2("maxUnavailable", "Max unavailable", (o) => text2(o.spec?.maxUnavailable), { width: "120px" }), num2("allowed", "Allowed", (o) => count(o.status?.disruptionsAllowed)), num2("healthy", "Healthy", (o) => ratio(o.status?.currentHealthy, o.status?.desiredHealthy)), AGE], { railColumn: "allowed" }),
+  PriorityClass: view("PriorityClasses", [NAME, num2("value", "Value", (o) => count(o.value), { width: "110px" }), col2("default", "Global default", (o) => o.globalDefault ? "Yes" : "No", { width: "110px" }), AGE], { railColumn: "value" }),
+  RuntimeClass: view("RuntimeClasses", [NAME, col2("handler", "Handler", (o) => text2(o.handler), { width: "minmax(100px, 1fr)" }), AGE], { railColumn: "handler" }),
+  Lease: view("Leases", [NAME, NAMESPACE, col2("holder", "Holder", (o) => text2(o.spec?.holderIdentity), { width: "minmax(160px, 2fr)" }), col2("renewed", "Renewed", (o) => timeOf2(o.spec?.renewTime), { cell: "age", width: "90px", align: "end" }), AGE], { railColumn: "renewed", details: (o) => kv(["Holder", o.spec?.holderIdentity], ["Duration", o.spec?.leaseDurationSeconds ? `${text2(o.spec.leaseDurationSeconds)}s` : ""], ["Renewed", o.spec?.renewTime], ["Transitions", o.spec?.leaseTransitions]) }),
   MutatingWebhookConfiguration: view("MutatingWebhookConfigurations", [NAME, num2("webhooks", "Webhooks", (o) => arr(o.webhooks).length), AGE], { railColumn: "webhooks" }),
   ValidatingWebhookConfiguration: view("ValidatingWebhookConfigurations", [NAME, num2("webhooks", "Webhooks", (o) => arr(o.webhooks).length), AGE], { railColumn: "webhooks" }),
   Service: view("Services", [
     NAME,
     NAMESPACE,
-    col("type", "Type", (o) => text(o.spec?.type), { width: "110px" }),
-    col("clusterIp", "Cluster IP", (o) => text(o.spec?.clusterIP), { cell: "mono", width: "minmax(110px, 1fr)" }),
-    col("ports", "Ports", (o) => servicePorts(o), { width: "minmax(120px, 1.4fr)" }),
-    col("externalIp", "External IP", (o) => externalIp(o), { width: "minmax(120px, 1.4fr)" }),
-    col("selector", "Selector", (o) => pairs(o.spec?.selector), { width: "minmax(120px, 1.4fr)" }),
+    col2("type", "Type", (o) => text2(o.spec?.type), { width: "110px" }),
+    col2("clusterIp", "Cluster IP", (o) => text2(o.spec?.clusterIP), { cell: "mono", width: "minmax(110px, 1fr)" }),
+    col2("ports", "Ports", (o) => servicePorts(o), { width: "minmax(120px, 1.4fr)" }),
+    col2("externalIp", "External IP", (o) => externalIp(o), { width: "minmax(120px, 1.4fr)" }),
+    col2("selector", "Selector", (o) => pairs(o.spec?.selector), { width: "minmax(120px, 1.4fr)" }),
     AGE,
     status((o) => o.spec?.type === "LoadBalancer" && loadBalancers(o).length === 0 ? st("Pending", "warning") : st("Active", "success"))
   ], {
@@ -8023,41 +8138,41 @@ var VIEWS = {
     status: (o) => o.spec?.type === "LoadBalancer" && loadBalancers(o).length === 0 ? st("Pending", "warning") : st("Active", "success"),
     details: (o) => kv(["Type", o.spec?.type], ["Cluster IP", o.spec?.clusterIP], ["External", externalIp(o)], ["Ports", servicePorts(o)], ["Selector", pairs(o.spec?.selector)], ["Session affinity", o.spec?.sessionAffinity])
   }),
-  Endpoints: view("Endpoints", [NAME, NAMESPACE, col("endpoints", "Endpoints", (o) => endpointsText(o), { width: "minmax(200px, 3fr)" }), AGE], { railColumn: "endpoints", status: (o) => endpointsText(o) ? st("Ready", "success") : st("No addresses", "warning") }),
-  EndpointSlice: view("EndpointSlices", [NAME, NAMESPACE, col("addressType", "Address type", (o) => text(o.addressType), { width: "110px" }), col("ports", "Ports", (o) => arr(o.ports).map((p) => text(p.port)).join(", "), { width: "110px" }), num2("endpoints", "Endpoints", (o) => arr(o.endpoints).length), AGE], { railColumn: "endpoints" }),
-  Ingress: view("Ingresses", [NAME, NAMESPACE, col("loadBalancers", "Load balancers", (o) => more(loadBalancers(o), 2), { width: "minmax(160px, 2fr)" }), col("rules", "Rules", (o) => more(arr(o.spec?.rules).map((r) => text(r.host) || "*"), 2), { width: "minmax(140px, 1.6fr)" }), AGE], { railColumn: "rules", details: (o) => kv(["Class", o.spec?.ingressClassName], ["Hosts", arr(o.spec?.rules).map((r) => text(r.host) || "*").join(", ")], ["Address", loadBalancers(o).join(", ")]) }),
-  IngressClass: view("IngressClasses", [NAME, col("controller", "Controller", (o) => text(o.spec?.controller), { width: "minmax(180px, 2fr)" }), AGE], { railColumn: "controller" }),
-  NetworkPolicy: view("NetworkPolicies", [NAME, NAMESPACE, col("types", "Policy types", (o) => Array.isArray(o.spec?.policyTypes) ? o.spec.policyTypes.join(", ") : "", { width: "minmax(120px, 1fr)" }), col("selector", "Pod selector", (o) => pairs(o.spec?.podSelector?.matchLabels), { width: "minmax(140px, 1.6fr)" }), AGE], { railColumn: "types" }),
-  PersistentVolumeClaim: view("PersistentVolumeClaims", [NAME, NAMESPACE, col("storageClass", "Storage class", (o) => text(o.spec?.storageClassName), { width: "minmax(110px, 1fr)" }), num2("size", "Size", (o) => pvcSize(o), { sort: (o) => quantityValue(pvcSize(o)), width: "90px" }), col("volume", "Volume", (o) => text(o.spec?.volumeName), { width: "minmax(140px, 1.5fr)" }), AGE, status((o) => pvStatus(text(o.status?.phase)))], {
+  Endpoints: view("Endpoints", [NAME, NAMESPACE, col2("endpoints", "Endpoints", (o) => endpointsText(o), { width: "minmax(200px, 3fr)" }), AGE], { railColumn: "endpoints", status: (o) => endpointsText(o) ? st("Ready", "success") : st("No addresses", "warning") }),
+  EndpointSlice: view("EndpointSlices", [NAME, NAMESPACE, col2("addressType", "Address type", (o) => text2(o.addressType), { width: "110px" }), col2("ports", "Ports", (o) => arr(o.ports).map((p) => text2(p.port)).join(", "), { width: "110px" }), num2("endpoints", "Endpoints", (o) => arr(o.endpoints).length), AGE], { railColumn: "endpoints" }),
+  Ingress: view("Ingresses", [NAME, NAMESPACE, col2("loadBalancers", "Load balancers", (o) => more(loadBalancers(o), 2), { width: "minmax(160px, 2fr)" }), col2("rules", "Rules", (o) => more(arr(o.spec?.rules).map((r) => text2(r.host) || "*"), 2), { width: "minmax(140px, 1.6fr)" }), AGE], { railColumn: "rules", details: (o) => kv(["Class", o.spec?.ingressClassName], ["Hosts", arr(o.spec?.rules).map((r) => text2(r.host) || "*").join(", ")], ["Address", loadBalancers(o).join(", ")]) }),
+  IngressClass: view("IngressClasses", [NAME, col2("controller", "Controller", (o) => text2(o.spec?.controller), { width: "minmax(180px, 2fr)" }), AGE], { railColumn: "controller" }),
+  NetworkPolicy: view("NetworkPolicies", [NAME, NAMESPACE, col2("types", "Policy types", (o) => Array.isArray(o.spec?.policyTypes) ? o.spec.policyTypes.join(", ") : "", { width: "minmax(120px, 1fr)" }), col2("selector", "Pod selector", (o) => pairs(o.spec?.podSelector?.matchLabels), { width: "minmax(140px, 1.6fr)" }), AGE], { railColumn: "types" }),
+  PersistentVolumeClaim: view("PersistentVolumeClaims", [NAME, NAMESPACE, col2("storageClass", "Storage class", (o) => text2(o.spec?.storageClassName), { width: "minmax(110px, 1fr)" }), num2("size", "Size", (o) => pvcSize(o), { sort: (o) => quantityValue(pvcSize(o)), width: "90px" }), col2("volume", "Volume", (o) => text2(o.spec?.volumeName), { width: "minmax(140px, 1.5fr)" }), AGE, status((o) => pvStatus(text2(o.status?.phase)))], {
     railColumn: "size",
-    status: (o) => pvStatus(text(o.status?.phase)),
+    status: (o) => pvStatus(text2(o.status?.phase)),
     details: (o) => kv(["Storage class", o.spec?.storageClassName], ["Size", pvcSize(o)], ["Access modes", Array.isArray(o.spec?.accessModes) ? o.spec.accessModes.join(", ") : ""], ["Volume", o.spec?.volumeName], ["Volume mode", o.spec?.volumeMode])
   }),
-  PersistentVolume: view("PersistentVolumes", [NAME, col("storageClass", "Storage class", (o) => text(o.spec?.storageClassName), { width: "minmax(110px, 1fr)" }), num2("capacity", "Capacity", (o) => text(o.spec?.capacity?.storage), { sort: (o) => quantityValue(o.spec?.capacity?.storage), width: "90px" }), col("claim", "Claim", (o) => o.spec?.claimRef ? `${text(o.spec.claimRef.namespace)}/${text(o.spec.claimRef.name)}` : "", { width: "minmax(160px, 2fr)" }), col("reclaim", "Reclaim", (o) => text(o.spec?.persistentVolumeReclaimPolicy), { width: "90px" }), AGE, status((o) => pvStatus(text(o.status?.phase)))], { railColumn: "capacity", status: (o) => pvStatus(text(o.status?.phase)), details: (o) => kv(["Capacity", o.spec?.capacity?.storage], ["Reclaim policy", o.spec?.persistentVolumeReclaimPolicy], ["Claim", o.spec?.claimRef ? `${text(o.spec.claimRef.namespace)}/${text(o.spec.claimRef.name)}` : ""], ["Storage class", o.spec?.storageClassName]) }),
-  StorageClass: view("StorageClasses", [NAME, col("provisioner", "Provisioner", (o) => text(o.provisioner), { width: "minmax(160px, 2fr)" }), col("reclaim", "Reclaim", (o) => text(o.reclaimPolicy), { width: "90px" }), col("default", "Default", (o) => isDefaultClass(o) ? "Yes" : "", { width: "80px" }), AGE], { railColumn: "provisioner" }),
-  Namespace: view("Namespaces", [NAME, col("labels", "Labels", (o) => pairs(o.metadata?.labels), { width: "minmax(160px, 3fr)" }), AGE, status((o) => text(o.status?.phase) === "Terminating" ? st("Terminating", "warning") : st(text(o.status?.phase) || "Active", "success"))], { railColumn: "age", status: (o) => text(o.status?.phase) === "Terminating" ? st("Terminating", "warning") : st(text(o.status?.phase) || "Active", "success") }),
+  PersistentVolume: view("PersistentVolumes", [NAME, col2("storageClass", "Storage class", (o) => text2(o.spec?.storageClassName), { width: "minmax(110px, 1fr)" }), num2("capacity", "Capacity", (o) => text2(o.spec?.capacity?.storage), { sort: (o) => quantityValue(o.spec?.capacity?.storage), width: "90px" }), col2("claim", "Claim", (o) => o.spec?.claimRef ? `${text2(o.spec.claimRef.namespace)}/${text2(o.spec.claimRef.name)}` : "", { width: "minmax(160px, 2fr)" }), col2("reclaim", "Reclaim", (o) => text2(o.spec?.persistentVolumeReclaimPolicy), { width: "90px" }), AGE, status((o) => pvStatus(text2(o.status?.phase)))], { railColumn: "capacity", status: (o) => pvStatus(text2(o.status?.phase)), details: (o) => kv(["Capacity", o.spec?.capacity?.storage], ["Reclaim policy", o.spec?.persistentVolumeReclaimPolicy], ["Claim", o.spec?.claimRef ? `${text2(o.spec.claimRef.namespace)}/${text2(o.spec.claimRef.name)}` : ""], ["Storage class", o.spec?.storageClassName]) }),
+  StorageClass: view("StorageClasses", [NAME, col2("provisioner", "Provisioner", (o) => text2(o.provisioner), { width: "minmax(160px, 2fr)" }), col2("reclaim", "Reclaim", (o) => text2(o.reclaimPolicy), { width: "90px" }), col2("default", "Default", (o) => isDefaultClass(o) ? "Yes" : "", { width: "80px" }), AGE], { railColumn: "provisioner" }),
+  Namespace: view("Namespaces", [NAME, col2("labels", "Labels", (o) => pairs(o.metadata?.labels), { width: "minmax(160px, 3fr)" }), AGE, status((o) => text2(o.status?.phase) === "Terminating" ? st("Terminating", "warning") : st(text2(o.status?.phase) || "Active", "success"))], { railColumn: "age", status: (o) => text2(o.status?.phase) === "Terminating" ? st("Terminating", "warning") : st(text2(o.status?.phase) || "Active", "success") }),
   Event: view("Events", [
-    col("type", "Type", (o) => text(o.type), { width: "80px" }),
-    col("message", "Message", (o) => text(o.message ?? o.note), { width: "minmax(260px, 4fr)" }),
+    col2("type", "Type", (o) => text2(o.type), { width: "80px" }),
+    col2("message", "Message", (o) => text2(o.message ?? o.note), { width: "minmax(260px, 4fr)" }),
     NAMESPACE,
-    col("object", "Involved object", (o) => involved(o), { width: "minmax(160px, 2fr)" }),
-    col("source", "Source", (o) => text(o.source?.component ?? o.reportingComponent), { width: "minmax(100px, 1fr)" }),
+    col2("object", "Involved object", (o) => involved(o), { width: "minmax(160px, 2fr)" }),
+    col2("source", "Source", (o) => text2(o.source?.component ?? o.reportingComponent), { width: "minmax(100px, 1fr)" }),
     num2("count", "Count", (o) => count(o.count ?? o.series?.count ?? 1)),
     AGE,
-    col("lastSeen", "Last seen", (o) => eventTime(o), { cell: "age", width: "80px", align: "end" })
+    col2("lastSeen", "Last seen", (o) => eventTime(o), { cell: "age", width: "80px", align: "end" })
   ], {
     sort: { column: "lastSeen", dir: "asc" },
     railColumn: "lastSeen",
-    railTitle: (o) => text(o.message ?? o.note) || text(o.reason),
-    status: (o) => text(o.type) === "Warning" ? st("Warning", "warning") : st(text(o.type) || "Normal", "info"),
+    railTitle: (o) => text2(o.message ?? o.note) || text2(o.reason),
+    status: (o) => text2(o.type) === "Warning" ? st("Warning", "warning") : st(text2(o.type) || "Normal", "info"),
     details: (o) => kv(["Reason", o.reason], ["Message", o.message ?? o.note], ["Object", involved(o)], ["Count", o.count ?? o.series?.count], ["Source", o.source?.component ?? o.reportingComponent])
   }),
   ServiceAccount: view("ServiceAccounts", [NAME, NAMESPACE, num2("secrets", "Secrets", (o) => arr(o.secrets).length), AGE], { railColumn: "secrets" }),
   ClusterRole: view("ClusterRoles", [NAME, num2("rules", "Rules", (o) => arr(o.rules).length), AGE], { railColumn: "rules" }),
   Role: view("Roles", [NAME, NAMESPACE, num2("rules", "Rules", (o) => arr(o.rules).length), AGE], { railColumn: "rules" }),
-  ClusterRoleBinding: view("ClusterRoleBindings", [NAME, col("subjects", "Subjects", (o) => subjects(o), { width: "minmax(180px, 2fr)" }), col("role", "Role", (o) => o.roleRef ? `${text(o.roleRef.kind)}/${text(o.roleRef.name)}` : "", { width: "minmax(160px, 2fr)" }), AGE], { railColumn: "role", details: (o) => kv(["Role", o.roleRef ? `${text(o.roleRef.kind)}/${text(o.roleRef.name)}` : ""], ["Subjects", arr(o.subjects).map((s) => `${text(s.kind)}:${text(s.namespace ? `${text(s.namespace)}/` : "")}${text(s.name)}`).join(", ")]) }),
-  RoleBinding: view("RoleBindings", [NAME, NAMESPACE, col("subjects", "Subjects", (o) => subjects(o), { width: "minmax(180px, 2fr)" }), col("role", "Role", (o) => o.roleRef ? `${text(o.roleRef.kind)}/${text(o.roleRef.name)}` : "", { width: "minmax(160px, 2fr)" }), AGE], { railColumn: "role", details: (o) => kv(["Role", o.roleRef ? `${text(o.roleRef.kind)}/${text(o.roleRef.name)}` : ""], ["Subjects", arr(o.subjects).map((s) => `${text(s.kind)}:${text(s.name)}`).join(", ")]) }),
-  CustomResourceDefinition: view("Definitions", [NAME, col("group", "Group", (o) => text(o.spec?.group), { width: "minmax(140px, 1.6fr)" }), col("kind", "Kind", (o) => text(o.spec?.names?.kind), { width: "minmax(110px, 1fr)" }), col("scope", "Scope", (o) => text(o.spec?.scope), { width: "90px" }), col("versions", "Versions", (o) => arr(o.spec?.versions).map((v) => text(v.name)).join(", "), { width: "90px" }), AGE], { railColumn: "kind", details: (o) => kv(["Group", o.spec?.group], ["Kind", o.spec?.names?.kind], ["Scope", o.spec?.scope], ["Versions", arr(o.spec?.versions).map((v) => text(v.name)).join(", ")]) })
+  ClusterRoleBinding: view("ClusterRoleBindings", [NAME, col2("subjects", "Subjects", (o) => subjects(o), { width: "minmax(180px, 2fr)" }), col2("role", "Role", (o) => o.roleRef ? `${text2(o.roleRef.kind)}/${text2(o.roleRef.name)}` : "", { width: "minmax(160px, 2fr)" }), AGE], { railColumn: "role", details: (o) => kv(["Role", o.roleRef ? `${text2(o.roleRef.kind)}/${text2(o.roleRef.name)}` : ""], ["Subjects", arr(o.subjects).map((s) => `${text2(s.kind)}:${text2(s.namespace ? `${text2(s.namespace)}/` : "")}${text2(s.name)}`).join(", ")]) }),
+  RoleBinding: view("RoleBindings", [NAME, NAMESPACE, col2("subjects", "Subjects", (o) => subjects(o), { width: "minmax(180px, 2fr)" }), col2("role", "Role", (o) => o.roleRef ? `${text2(o.roleRef.kind)}/${text2(o.roleRef.name)}` : "", { width: "minmax(160px, 2fr)" }), AGE], { railColumn: "role", details: (o) => kv(["Role", o.roleRef ? `${text2(o.roleRef.kind)}/${text2(o.roleRef.name)}` : ""], ["Subjects", arr(o.subjects).map((s) => `${text2(s.kind)}:${text2(s.name)}`).join(", ")]) }),
+  CustomResourceDefinition: view("Definitions", [NAME, col2("group", "Group", (o) => text2(o.spec?.group), { width: "minmax(140px, 1.6fr)" }), col2("kind", "Kind", (o) => text2(o.spec?.names?.kind), { width: "minmax(110px, 1fr)" }), col2("scope", "Scope", (o) => text2(o.spec?.scope), { width: "90px" }), col2("versions", "Versions", (o) => arr(o.spec?.versions).map((v) => text2(v.name)).join(", "), { width: "90px" }), AGE], { railColumn: "kind", details: (o) => kv(["Group", o.spec?.group], ["Kind", o.spec?.names?.kind], ["Scope", o.spec?.scope], ["Versions", arr(o.spec?.versions).map((v) => text2(v.name)).join(", ")]) })
 };
 function pvStatus(phase) {
   if (phase === "Bound" || phase === "Available")
@@ -8073,7 +8188,7 @@ var item = (kind) => ({ kind, title: VIEWS[kind]?.title ?? `${kind}s` });
 var CLUSTER_OVERVIEW = "ClusterOverview";
 var WORKLOADS_OVERVIEW = "WorkloadsOverview";
 var OVERVIEW_KINDS = new Set([CLUSTER_OVERVIEW, WORKLOADS_OVERVIEW]);
-var SPECIAL_KINDS = new Set([CLUSTER_OVERVIEW, WORKLOADS_OVERVIEW, "PortForwards"]);
+var SPECIAL_KINDS = new Set([CLUSTER_OVERVIEW, WORKLOADS_OVERVIEW, "PortForwards", HELM_RELEASES]);
 var NAV = [
   { id: "cluster", title: "Cluster", heading: true, items: [{ kind: CLUSTER_OVERVIEW, title: "Overview" }] },
   { id: "nodes", title: "Nodes", items: [item("Node")] },
@@ -8091,10 +8206,58 @@ var NAV = [
   { id: "storage", title: "Storage", items: ["PersistentVolumeClaim", "PersistentVolume", "StorageClass"].map(item) },
   { id: "namespaces", title: "Namespaces", items: [item("Namespace")] },
   { id: "events", title: "Events", items: [item("Event")] },
+  { id: "helm", title: "Helm", heading: true, items: [{ kind: HELM_RELEASES, title: "Releases" }] },
   { id: "access", title: "Access control", items: ["ServiceAccount", "ClusterRole", "Role", "ClusterRoleBinding", "RoleBinding"].map(item) },
   { id: "crds", title: "Custom resources", items: [item("CustomResourceDefinition")] },
   { id: "forwards", title: "Port forwarding", items: [{ kind: "PortForwards", title: "Port forwarding" }] }
 ];
+var viewHelpers = { col: col2, NAME, NAMESPACE, AGE, st, kv, condition, text: text2, arr, pairs, trueConditions };
+
+// node_modules/yaml/dist/index.js
+var composer = require_composer();
+var Document = require_Document();
+var Schema = require_Schema();
+var errors = require_errors();
+var Alias = require_Alias();
+var identity = require_identity();
+var Pair = require_Pair();
+var Scalar = require_Scalar();
+var YAMLMap = require_YAMLMap();
+var YAMLSeq = require_YAMLSeq();
+var cst = require_cst();
+var lexer = require_lexer();
+var lineCounter = require_line_counter();
+var parser = require_parser();
+var publicApi = require_public_api();
+var visit = require_visit();
+var $Composer = composer.Composer;
+var $Document = Document.Document;
+var $Schema = Schema.Schema;
+var $YAMLError = errors.YAMLError;
+var $YAMLParseError = errors.YAMLParseError;
+var $YAMLWarning = errors.YAMLWarning;
+var $Alias = Alias.Alias;
+var $isAlias = identity.isAlias;
+var $isCollection = identity.isCollection;
+var $isDocument = identity.isDocument;
+var $isMap = identity.isMap;
+var $isNode = identity.isNode;
+var $isPair = identity.isPair;
+var $isScalar = identity.isScalar;
+var $isSeq = identity.isSeq;
+var $Pair = Pair.Pair;
+var $Scalar = Scalar.Scalar;
+var $YAMLMap = YAMLMap.YAMLMap;
+var $YAMLSeq = YAMLSeq.YAMLSeq;
+var $Lexer = lexer.Lexer;
+var $LineCounter = lineCounter.LineCounter;
+var $Parser = parser.Parser;
+var $parse = publicApi.parse;
+var $parseAllDocuments = publicApi.parseAllDocuments;
+var $parseDocument = publicApi.parseDocument;
+var $stringify = publicApi.stringify;
+var $visit = visit.visit;
+var $visitAsync = visit.visitAsync;
 
 // src/shared/redact.ts
 var LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration";
@@ -8131,6 +8294,103 @@ var redactSecret = (object, reveal = false) => {
 var forPanel = (isSecretKind, object, reveal = false) => {
   const stripped = stripNoise(object);
   return isSecretKind ? redactSecret(stripped, reveal) : stripped;
+};
+var REDACTED = "<redacted>";
+var SENSITIVE_KEY = /(password|secret|token|key|credential)/i;
+var isSensitiveKey = (key) => SENSITIVE_KEY.test(key);
+var redactValues = (value, hide = false) => {
+  if (Array.isArray(value))
+    return value.map((entry) => redactValues(entry, hide));
+  if (value && typeof value === "object") {
+    const source = value;
+    const nameHides = typeof source.name === "string" && isSensitiveKey(source.name);
+    const out = {};
+    for (const [key, entry] of Object.entries(source))
+      out[key] = redactValues(entry, hide || isSensitiveKey(key) || nameHides && key === "value");
+    return out;
+  }
+  if (hide && (typeof value === "string" && value !== "" || typeof value === "number" || typeof value === "bigint"))
+    return REDACTED;
+  return value;
+};
+var pathText = (path) => path.map((part) => typeof part === "number" ? `[${part}]` : `.${part}`).join("").replace(/^\./, "") || "(root)";
+var restoreRedacted = (edited, original) => {
+  const unresolved = [];
+  const walk = (node, before, path) => {
+    if (node === REDACTED) {
+      if (before !== undefined && before !== null && typeof before !== "object")
+        return before;
+      unresolved.push(pathText(path));
+      return node;
+    }
+    if (Array.isArray(node))
+      return node.map((entry, index) => walk(entry, Array.isArray(before) ? before[index] : undefined, [...path, index]));
+    if (node && typeof node === "object") {
+      const previous = before && typeof before === "object" && !Array.isArray(before) ? before : {};
+      return Object.fromEntries(Object.entries(node).map(([key, entry]) => [key, walk(entry, previous[key], [...path, key])]));
+    }
+    return node;
+  };
+  return { value: walk(edited, original, []), unresolved };
+};
+var SEPARATOR = /^---\s*(#.*)?$/;
+var SECRET_KIND = /^\s*kind:\s*['"]?Secret['"]?\s*(#.*)?$/m;
+var hideSecretDocument = (value) => redactSecret(value);
+var redactDocument = (lines) => {
+  const text = lines.join(`
+`);
+  if (!/Secret/.test(text))
+    return { lines, secrets: 0 };
+  const parsed = $parseDocument(text);
+  if (parsed.errors.length > 0) {
+    return SECRET_KIND.test(text) ? { lines: [...lines.filter((line) => line.trim().startsWith("#")), "# A Secret document that could not be read was hidden."], secrets: 1 } : { lines, secrets: 0 };
+  }
+  const value = parsed.toJS();
+  if (!value || typeof value !== "object")
+    return { lines, secrets: 0 };
+  const object = value;
+  const comments = lines.filter((line) => line.trim().startsWith("#"));
+  if (object.kind === "Secret") {
+    return { lines: [...comments, ...$stringify(hideSecretDocument(object), { lineWidth: 0, indent: 2 }).trimEnd().split(`
+`)], secrets: 1 };
+  }
+  if (Array.isArray(object.items) && object.items.some((item) => item?.kind === "Secret")) {
+    let secrets = 0;
+    const items = object.items.map((item) => {
+      if (item?.kind !== "Secret")
+        return item;
+      secrets += 1;
+      return hideSecretDocument(item);
+    });
+    return { lines: [...comments, ...$stringify({ ...object, items }, { lineWidth: 0, indent: 2 }).trimEnd().split(`
+`)], secrets };
+  }
+  return { lines, secrets: 0 };
+};
+var redactManifest = (manifest) => {
+  const out = [];
+  let secrets = 0;
+  let current = [];
+  const flush = () => {
+    if (current.length === 0)
+      return;
+    const result = redactDocument(current);
+    out.push(...result.lines);
+    secrets += result.secrets;
+    current = [];
+  };
+  for (const line of manifest.replace(/\r\n/g, `
+`).split(`
+`)) {
+    if (SEPARATOR.test(line)) {
+      flush();
+      out.push(line);
+    } else
+      current.push(line);
+  }
+  flush();
+  return { text: out.join(`
+`), secrets };
 };
 
 // src/service/k8s.ts
@@ -8259,6 +8519,9 @@ var openStream = async (target, path, query, onLine, onEnd) => {
 var discovery = new Map;
 var DISCOVERY_MS = 10 * 60 * 1000;
 var fromResources = (group, version, resources) => resources.filter((resource) => !resource.name.includes("/")).map((resource) => ({ kind: resource.kind, plural: resource.name, group, version, namespaced: resource.namespaced, aliases: [...resource.shortNames ?? [], ...resource.singularName ? [resource.singularName] : []].map((text) => text.toLowerCase()) }));
+var forgetDiscovery = (target) => {
+  discovery.delete(targetKey(target));
+};
 var discoverAll = async (target) => {
   const key = targetKey(target);
   const hit = discovery.get(key);
@@ -8963,10 +9226,10 @@ var limitSeries = (series, limit = SERIES_SHOWN) => {
 
 // src/shared/ops.ts
 var arr2 = (value) => Array.isArray(value) ? value : [];
-var text2 = (value) => value === undefined || value === null ? "" : String(value);
+var text3 = (value) => value === undefined || value === null ? "" : String(value);
 var manualJobFor = (cronJob, now) => {
   const template = cronJob.spec?.jobTemplate ?? {};
-  const name = text2(cronJob.metadata?.name);
+  const name = text3(cronJob.metadata?.name);
   const stamp = now.toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "-");
   return {
     ...template,
@@ -8975,14 +9238,14 @@ var manualJobFor = (cronJob, now) => {
     metadata: {
       ...template.metadata ?? {},
       name: `${name}-manual-${stamp}`,
-      namespace: text2(cronJob.metadata?.namespace),
+      namespace: text3(cronJob.metadata?.namespace),
       annotations: { ...template.metadata?.annotations ?? {}, "cronjob.kubernetes.io/instantiate": "manual" },
       ownerReferences: [
         {
           apiVersion: "batch/v1",
           kind: "CronJob",
           name,
-          uid: text2(cronJob.metadata?.uid),
+          uid: text3(cronJob.metadata?.uid),
           controller: true,
           blockOwnerDeletion: true
         }
@@ -8995,12 +9258,12 @@ var replicaSetRevision = (replicaSet) => {
   return Number.isInteger(raw) ? raw : null;
 };
 var deploymentRevisions = (deployment, replicaSets) => {
-  const uid = text2(deployment.metadata?.uid);
-  return replicaSets.filter((rs) => arr2(rs.metadata?.ownerReferences).some((owner) => owner.kind === "Deployment" && (text2(owner.uid) === uid || text2(owner.name) === text2(deployment.metadata?.name)))).map((rs) => ({ revision: replicaSetRevision(rs), name: text2(rs.metadata?.name), template: rs.spec?.template ?? null, created: rs.metadata?.creationTimestamp ?? null })).filter((entry) => entry.revision !== null).sort((a, b) => b.revision - a.revision);
+  const uid = text3(deployment.metadata?.uid);
+  return replicaSets.filter((rs) => arr2(rs.metadata?.ownerReferences).some((owner) => owner.kind === "Deployment" && (text3(owner.uid) === uid || text3(owner.name) === text3(deployment.metadata?.name)))).map((rs) => ({ revision: replicaSetRevision(rs), name: text3(rs.metadata?.name), template: rs.spec?.template ?? null, created: rs.metadata?.creationTimestamp ?? null })).filter((entry) => entry.revision !== null).sort((a, b) => b.revision - a.revision);
 };
 var statefulSetRevisions = (statefulSet, revisions) => {
-  const uid = text2(statefulSet.metadata?.uid);
-  return revisions.filter((cr) => arr2(cr.metadata?.ownerReferences).some((owner) => owner.kind === "StatefulSet" && (text2(owner.uid) === uid || text2(owner.name) === text2(statefulSet.metadata?.name)))).map((cr) => ({ revision: Number.isInteger(cr.revision) ? cr.revision : null, name: text2(cr.metadata?.name), template: cr.data?.raw ?? null, created: cr.metadata?.creationTimestamp ?? null })).filter((entry) => entry.revision !== null && entry.template !== null).sort((a, b) => b.revision - a.revision);
+  const uid = text3(statefulSet.metadata?.uid);
+  return revisions.filter((cr) => arr2(cr.metadata?.ownerReferences).some((owner) => owner.kind === "StatefulSet" && (text3(owner.uid) === uid || text3(owner.name) === text3(statefulSet.metadata?.name)))).map((cr) => ({ revision: Number.isInteger(cr.revision) ? cr.revision : null, name: text3(cr.metadata?.name), template: cr.data?.raw ?? null, created: cr.metadata?.creationTimestamp ?? null })).filter((entry) => entry.revision !== null && entry.template !== null).sort((a, b) => b.revision - a.revision);
 };
 var currentRevision = (object) => {
   const raw = Number(object.metadata?.annotations?.["deployment.kubernetes.io/revision"]);
@@ -9019,7 +9282,7 @@ var drainIssue = (pod) => {
 var drainKind = (pod) => {
   const owners = arr2(pod.metadata?.ownerReferences);
   const owner = owners.find((entry) => entry.controller) ?? owners[0];
-  return owner ? `${text2(owner.kind)}/${text2(owner.name)}` : "No controller";
+  return owner ? `${text3(owner.kind)}/${text3(owner.name)}` : "No controller";
 };
 var fluxPatch = (action, now) => {
   if (action === "reconcile")
@@ -9049,51 +9312,607 @@ var parseAuditLine = (line) => {
   }
 };
 
-// node_modules/yaml/dist/index.js
-var composer = require_composer();
-var Document = require_Document();
-var Schema = require_Schema();
-var errors = require_errors();
-var Alias = require_Alias();
-var identity = require_identity();
-var Pair = require_Pair();
-var Scalar = require_Scalar();
-var YAMLMap = require_YAMLMap();
-var YAMLSeq = require_YAMLSeq();
-var cst = require_cst();
-var lexer = require_lexer();
-var lineCounter = require_line_counter();
-var parser = require_parser();
-var publicApi = require_public_api();
-var visit = require_visit();
-var $Composer = composer.Composer;
-var $Document = Document.Document;
-var $Schema = Schema.Schema;
-var $YAMLError = errors.YAMLError;
-var $YAMLParseError = errors.YAMLParseError;
-var $YAMLWarning = errors.YAMLWarning;
-var $Alias = Alias.Alias;
-var $isAlias = identity.isAlias;
-var $isCollection = identity.isCollection;
-var $isDocument = identity.isDocument;
-var $isMap = identity.isMap;
-var $isNode = identity.isNode;
-var $isPair = identity.isPair;
-var $isScalar = identity.isScalar;
-var $isSeq = identity.isSeq;
-var $Pair = Pair.Pair;
-var $Scalar = Scalar.Scalar;
-var $YAMLMap = YAMLMap.YAMLMap;
-var $YAMLSeq = YAMLSeq.YAMLSeq;
-var $Lexer = lexer.Lexer;
-var $LineCounter = lineCounter.LineCounter;
-var $Parser = parser.Parser;
-var $parse = publicApi.parse;
-var $parseAllDocuments = publicApi.parseAllDocuments;
-var $parseDocument = publicApi.parseDocument;
-var $stringify = publicApi.stringify;
-var $visit = visit.visit;
-var $visitAsync = visit.visitAsync;
+// src/shared/gitops.ts
+var { col: col3, NAME: NAME3, NAMESPACE: NAMESPACE2, AGE: AGE2, st: st2, kv: kv2, condition: condition2, text: text4, arr: arr3 } = viewHelpers;
+var shortRevision = (revision) => revision.replace(/\b(sha1|sha256|sha512):([0-9a-f]{8,})/g, (_all, algo, hash) => `${algo}:${hash.slice(0, 7)}`).replace(/^[0-9a-f]{40,64}$/, (hash) => hash.slice(0, 7));
+var tone = (get) => ({ cell: "tone", tone: get });
+var clipMessage = (message) => message.replace(/\s+/g, " ").trim();
+var syncTone = (status) => status === "Synced" ? "success" : status === "OutOfSync" ? "warning" : status ? "muted" : null;
+var healthTone = (status) => {
+  if (status === "Healthy")
+    return "success";
+  if (status === "Progressing")
+    return "info";
+  if (status === "Degraded" || status === "Missing")
+    return "error";
+  if (status === "Suspended")
+    return "warning";
+  return status ? "muted" : null;
+};
+var syncOf = (o) => text4(o.status?.sync?.status);
+var healthOf = (o) => text4(o.status?.health?.status);
+var argoStatus = (o) => {
+  const sync = syncOf(o);
+  const health = healthOf(o);
+  if (!sync && !health)
+    return null;
+  if (health === "Degraded" || health === "Missing")
+    return st2(health, "error");
+  if (sync === "OutOfSync")
+    return st2("OutOfSync", "warning");
+  if (health === "Progressing")
+    return st2("Progressing", "info");
+  if (health === "Suspended")
+    return st2("Suspended", "muted");
+  if (sync === "Synced" && health === "Healthy")
+    return st2("Healthy", "success");
+  return st2(health || sync, "muted");
+};
+var argoRevision = (o) => shortRevision(text4(o.status?.sync?.revision ?? o.status?.sync?.revisions?.[0]));
+var argoTarget = (o) => text4(o.spec?.source?.targetRevision ?? arr3(o.spec?.sources)[0]?.targetRevision);
+var argoRepo = (o) => text4(o.spec?.source?.repoURL ?? arr3(o.spec?.sources)[0]?.repoURL ?? o.spec?.source?.chart);
+var argoDestination = (o) => {
+  const where = text4(o.spec?.destination?.name) || text4(o.spec?.destination?.server).replace(/^https?:\/\//, "");
+  const namespace = text4(o.spec?.destination?.namespace);
+  return [namespace, where].filter(Boolean).join(" on ");
+};
+var argoMessage = (o) => clipMessage(text4(o.status?.operationState?.message || arr3(o.status?.conditions)[0]?.message));
+var argoApplicationView = {
+  title: "Applications",
+  columns: [
+    NAME3,
+    NAMESPACE2,
+    col3("sync", "Sync", syncOf, { ...tone((o) => syncTone(syncOf(o))), width: "minmax(90px, 1fr)" }),
+    col3("health", "Health", healthOf, { ...tone((o) => healthTone(healthOf(o))), width: "minmax(90px, 1fr)" }),
+    col3("revision", "Revision", argoRevision, { cell: "mono", width: "minmax(90px, 1fr)", hint: "The revision last synced" }),
+    col3("target", "Target", argoTarget, { width: "minmax(80px, 1fr)", hint: "The branch, tag or version the application follows" }),
+    col3("project", "Project", (o) => text4(o.spec?.project), { width: "minmax(90px, 1fr)" }),
+    col3("destination", "Destination", argoDestination, { width: "minmax(140px, 2fr)" }),
+    col3("reconciled", "Last reconcile", (o) => timeOf2(o.status?.reconciledAt), { cell: "age", width: "96px", align: "end" }),
+    col3("message", "Message", argoMessage, { width: "minmax(200px, 3fr)" })
+  ],
+  sort: { column: "name", dir: "asc" },
+  railColumn: "health",
+  status: argoStatus,
+  details: (o) => kv2(["Sync", syncOf(o)], ["Health", healthOf(o)], ["Revision", argoRevision(o)], ["Target", argoTarget(o)], ["Repository", argoRepo(o)], ["Project", o.spec?.project], ["Destination", argoDestination(o)], ["Message", argoMessage(o)])
+};
+var applicationSetStatus = (o) => {
+  if (condition2(o, "ErrorOccurred")?.status === "True")
+    return st2("Error", "error");
+  if (condition2(o, "ResourcesUpToDate")?.status === "True")
+    return st2("Up to date", "success");
+  if (condition2(o, "ParametersGenerated")?.status === "False")
+    return st2("Not generated", "warning");
+  return arr3(o.status?.conditions).length > 0 ? st2("Pending", "info") : null;
+};
+var generators = (o) => arr3(o.spec?.generators).map((entry) => Object.keys(entry)[0] ?? "").filter(Boolean).join(", ");
+var appSetMessage = (o) => clipMessage(text4(condition2(o, "ErrorOccurred")?.status === "True" ? condition2(o, "ErrorOccurred")?.message : condition2(o, "ResourcesUpToDate")?.message ?? condition2(o, "ParametersGenerated")?.message));
+var argoApplicationSetView = {
+  title: "ApplicationSets",
+  columns: [
+    NAME3,
+    NAMESPACE2,
+    col3("ready", "Ready", (o) => applicationSetStatus(o)?.label ?? "", { cell: "status", width: "minmax(100px, 1fr)" }),
+    col3("generators", "Generators", generators, { width: "minmax(120px, 1.4fr)" }),
+    col3("applications", "Applications", (o) => Array.isArray(o.status?.applicationStatus) ? o.status.applicationStatus.length : null, { width: "100px", align: "end" }),
+    col3("message", "Message", appSetMessage, { width: "minmax(220px, 4fr)" }),
+    AGE2
+  ],
+  sort: { column: "name", dir: "asc" },
+  railColumn: "ready",
+  status: applicationSetStatus,
+  details: (o) => kv2(["Generators", generators(o)], ["Applications", Array.isArray(o.status?.applicationStatus) ? String(o.status.applicationStatus.length) : ""], ["Message", appSetMessage(o)])
+};
+var argoProjectView = {
+  title: "AppProjects",
+  columns: [
+    NAME3,
+    NAMESPACE2,
+    col3("description", "Description", (o) => text4(o.spec?.description), { width: "minmax(200px, 4fr)" }),
+    col3("sources", "Sources", (o) => arr3(o.spec?.sourceRepos).length, { width: "80px", align: "end" }),
+    col3("destinations", "Destinations", (o) => arr3(o.spec?.destinations).length, { width: "100px", align: "end" }),
+    AGE2
+  ],
+  sort: { column: "name", dir: "asc" },
+  railColumn: "description",
+  details: (o) => kv2(["Description", o.spec?.description], ["Source repositories", arr3(o.spec?.sourceRepos).length], ["Destinations", arr3(o.spec?.destinations).length])
+};
+
+// src/shared/crds.ts
+var { col: col4, NAME: NAME4, NAMESPACE: NAMESPACE3, AGE: AGE3, st: st3, kv: kv3, text: text5, arr: arr4 } = viewHelpers;
+var conditionsInSchema = (version) => Boolean(version.schema?.openAPIV3Schema?.properties?.status?.properties?.conditions);
+var entriesFromCrds = (items, versionFor) => {
+  const out = [];
+  for (const item of items) {
+    const spec = item.spec;
+    const names = spec?.names;
+    if (!spec || !names || typeof spec.group !== "string" || typeof names.kind !== "string" || typeof names.plural !== "string")
+      continue;
+    const established = arr4(item.status?.conditions).find((c) => c.type === "Established");
+    if (established && established.status !== "True")
+      continue;
+    const served = arr4(spec.versions).filter((v) => v.served !== false);
+    if (served.length === 0)
+      continue;
+    const wanted = versionFor(spec.group, names.plural);
+    const chosen = served.find((v) => v.name === wanted) ?? served.find((v) => v.storage === true) ?? served[0];
+    out.push({
+      group: spec.group,
+      kind: names.kind,
+      plural: names.plural,
+      singular: text5(names.singular),
+      shortNames: arr4(names.shortNames).map(String),
+      scope: spec.scope === "Cluster" ? "Cluster" : "Namespaced",
+      version: text5(chosen.name),
+      versions: served.map((v) => text5(v.name)),
+      columns: arr4(chosen.additionalPrinterColumns).map((c) => ({
+        name: text5(c.name),
+        type: text5(c.type) || "string",
+        jsonPath: text5(c.jsonPath ?? c.JSONPath),
+        description: text5(c.description),
+        priority: Number.isFinite(Number(c.priority)) ? Number(c.priority) : 0
+      })),
+      conditions: conditionsInSchema(chosen)
+    });
+  }
+  return out;
+};
+
+// src/service/crds.ts
+var CACHE_MS = 60000;
+var cache = new Map;
+var readCrds = async (target, refresh = false) => {
+  const key = targetKey(target);
+  const hit = cache.get(key);
+  if (!refresh && hit && Date.now() - hit.at < CACHE_MS)
+    return hit.entries;
+  if (refresh)
+    forgetDiscovery(target);
+  const [list, kinds] = await Promise.all([
+    callJson(target, { path: "/apis/apiextensions.k8s.io/v1/customresourcedefinitions", timeoutMs: 60000 }),
+    discoverAll(target).catch(() => [])
+  ]);
+  const served = new Map(kinds.map((info) => [`${info.group}|${info.plural}`, info.version]));
+  const entries = entriesFromCrds(list.items ?? [], (group, plural) => served.get(`${group}|${plural}`));
+  cache.set(key, { at: Date.now(), entries });
+  return entries;
+};
+
+// src/service/helm.ts
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join as join5 } from "node:path";
+import { gunzipSync } from "node:zlib";
+
+// src/shared/diff.ts
+var MAX_LINES = 1200;
+var split = (text) => text.replace(/\r\n/g, `
+`).split(`
+`);
+var diffLines = (before, after) => {
+  const a = split(before);
+  const b = split(after);
+  if (a.length > MAX_LINES || b.length > MAX_LINES) {
+    const removed = a.map((text) => ({ kind: "del", text }));
+    const added = b.map((text) => ({ kind: "add", text }));
+    return [...removed, ...added];
+  }
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  const table = new Uint32Array(rows * cols);
+  for (let i = a.length - 1;i >= 0; i -= 1) {
+    for (let j = b.length - 1;j >= 0; j -= 1) {
+      table[i * cols + j] = a[i] === b[j] ? table[(i + 1) * cols + j + 1] + 1 : Math.max(table[(i + 1) * cols + j], table[i * cols + j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      out.push({ kind: "same", text: a[i] });
+      i += 1;
+      j += 1;
+    } else if (table[(i + 1) * cols + j] >= table[i * cols + j + 1]) {
+      out.push({ kind: "del", text: a[i] });
+      i += 1;
+    } else {
+      out.push({ kind: "add", text: b[j] });
+      j += 1;
+    }
+  }
+  while (i < a.length) {
+    out.push({ kind: "del", text: a[i] });
+    i += 1;
+  }
+  while (j < b.length) {
+    out.push({ kind: "add", text: b[j] });
+    j += 1;
+  }
+  return out;
+};
+var diffCount = (lines) => ({
+  added: lines.filter((line) => line.kind === "add").length,
+  removed: lines.filter((line) => line.kind === "del").length
+});
+var withContext = (lines, context = 3) => {
+  const keep = new Array(lines.length).fill(false);
+  lines.forEach((line, index) => {
+    if (line.kind === "same")
+      return;
+    for (let at = Math.max(0, index - context);at <= Math.min(lines.length - 1, index + context); at += 1)
+      keep[at] = true;
+  });
+  const out = [];
+  let hidden = 0;
+  lines.forEach((line, index) => {
+    if (keep[index]) {
+      if (hidden > 0)
+        out.push({ kind: "skip", text: `${hidden} unchanged ${hidden === 1 ? "line" : "lines"}` });
+      hidden = 0;
+      out.push(line);
+    } else
+      hidden += 1;
+  });
+  if (hidden > 0)
+    out.push({ kind: "skip", text: `${hidden} unchanged ${hidden === 1 ? "line" : "lines"}` });
+  return out;
+};
+var SEPARATOR2 = /^---\s*(#.*)?$/;
+var manifestDocs = (manifest) => {
+  const chunks = [[]];
+  for (const line of manifest.replace(/\r\n/g, `
+`).split(`
+`)) {
+    if (SEPARATOR2.test(line))
+      chunks.push([]);
+    else
+      chunks[chunks.length - 1].push(line);
+  }
+  const docs = [];
+  chunks.forEach((lines, index) => {
+    const text = lines.filter((line) => !line.trim().startsWith("#")).join(`
+`).trim();
+    if (!text)
+      return;
+    let key = `Document ${index}`;
+    const parsed = $parseDocument(text);
+    if (parsed.errors.length === 0) {
+      const value = parsed.toJS();
+      if (value && typeof value.kind === "string" && typeof value.metadata?.name === "string") {
+        key = `${value.kind}/${value.metadata.name}${typeof value.metadata.namespace === "string" ? ` in ${value.metadata.namespace}` : ""}`;
+      }
+    }
+    docs.push({ key, text });
+  });
+  return docs;
+};
+var MAX_CHANGED_DOCS = 60;
+var MAX_CHANGE_LINES = 300;
+var diffManifests = (before, after, context = 3) => {
+  const a = new Map(manifestDocs(before).map((doc) => [doc.key, doc.text]));
+  const b = new Map(manifestDocs(after).map((doc) => [doc.key, doc.text]));
+  const added = [...b.keys()].filter((key) => !a.has(key));
+  const removed = [...a.keys()].filter((key) => !b.has(key));
+  const changed = [];
+  let unchanged = 0;
+  let truncated = false;
+  for (const [key, text] of b) {
+    const old = a.get(key);
+    if (old === undefined)
+      continue;
+    if (old === text) {
+      unchanged += 1;
+      continue;
+    }
+    if (changed.length >= MAX_CHANGED_DOCS) {
+      truncated = true;
+      continue;
+    }
+    const lines = diffLines(old, text);
+    const counts = diffCount(lines);
+    const short = withContext(lines, context);
+    if (short.length > MAX_CHANGE_LINES)
+      truncated = true;
+    changed.push({ key, ...counts, lines: short.slice(0, MAX_CHANGE_LINES) });
+  }
+  return { added, removed, changed, unchanged, truncated };
+};
+
+// src/service/helm.ts
+var helmPath = () => {
+  const found = findBin("helm");
+  if (!found)
+    throw new K8sError("NO_KUBECTL", "helm was not found. Install it, for example with Homebrew (brew install helm), then try again.", { kind: "install" });
+  return found;
+};
+var defaultRunner = (args, options) => run(helmPath(), args, options);
+var runner = defaultRunner;
+var TIME_FORMAT = "2006-01-02T15:04:05Z07:00";
+var RELEASE_STATES = ["--deployed", "--failed", "--pending", "--superseded", "--uninstalled", "--uninstalling"];
+var helmError = (stderr, exitedEmpty = false, context) => {
+  const text = stderr.trim();
+  if (!text && exitedEmpty)
+    return new K8sError("K8S_ERROR", "Helm took too long to answer or was stopped.");
+  if (/release: not found|release ".*" not found|no revision for release/i.test(text))
+    return new K8sError("NOT_FOUND", "That release or revision was not found.");
+  if (/another operation \(install\/upgrade\/rollback\) is in progress/i.test(text))
+    return new K8sError("CONFLICT", "Another Helm change is running on this release. Try again when it has finished.");
+  if (/\bforbidden\b|cannot (get|list|create|patch|update|delete) resource/i.test(text))
+    return new K8sError("FORBIDDEN", clip(text) || "You are not allowed to do that here.");
+  if (/cluster unreachable|kubernetes cluster unreachable/i.test(text) && !/unauthorized|token|sso|credentials/i.test(text))
+    return new K8sError("UNREACHABLE", "The cluster is not reachable. Check your network or VPN.");
+  return fromOutput(text, "Helm did not finish.", context);
+};
+var helm = async (target, args, options = {}) => {
+  const full = options.noCluster ? args : [...args, "--kube-context", target.context, ...kubeconfigArgs(target.kubeconfig), ...options.namespace ? ["--namespace", options.namespace] : []];
+  const result = await runner(full, { timeoutMs: options.timeoutMs ?? 60000, maxBuffer: options.maxBuffer ?? 64000000 });
+  if (result.code !== 0)
+    throw helmError(result.stderr || result.stdout, result.code === -1, target.context);
+  return result.stdout;
+};
+var bad = (message) => new K8sError("BAD_REQUEST", message);
+var checkNames = (namespace, name) => {
+  if (!validNamespaceName(namespace))
+    throw bad("That namespace name is not valid.");
+  if (!validReleaseName(name))
+    throw bad("That release name is not valid.");
+};
+var listReleases = async (target, namespace) => {
+  if (namespace !== null && !validNamespaceName(namespace))
+    throw bad("That namespace name is not valid.");
+  const out = await helm(target, ["list", ...namespace ? [] : ["--all-namespaces"], "--max", "1000", ...RELEASE_STATES, "--output", "json", "--time-format", TIME_FORMAT], { namespace, timeoutMs: 90000 });
+  return parseHelmList(out);
+};
+var releaseHistory = async (target, namespace, name, max = 256) => {
+  checkNames(namespace, name);
+  return parseHelmHistory(await helm(target, ["history", name, "--max", String(max), "--output", "json"], { namespace }));
+};
+var rawValues = async (target, namespace, name, options = {}) => {
+  const out = await helm(target, ["get", "values", name, "--output", "json", ...options.all ? ["--all"] : [], ...options.revision ? ["--revision", String(options.revision)] : []], { namespace });
+  try {
+    const parsed = JSON.parse(out || "null");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    throw new K8sError("K8S_ERROR", "Helm answered something unreadable.");
+  }
+};
+var panelValues = async (target, namespace, name, options = {}) => {
+  checkNames(namespace, name);
+  if (options.revision !== undefined && !validRevision(options.revision))
+    throw bad("That revision is not valid.");
+  return redactValues(await rawValues(target, namespace, name, options));
+};
+var rawManifest = async (target, namespace, name, revision) => helm(target, ["get", "manifest", name, ...revision ? ["--revision", String(revision)] : []], { namespace });
+var panelManifest = async (target, namespace, name, revision) => {
+  checkNames(namespace, name);
+  if (revision !== undefined && !validRevision(revision))
+    throw bad("That revision is not valid.");
+  const { text, secrets } = redactManifest(await rawManifest(target, namespace, name, revision));
+  return { manifest: text, secrets, resources: manifestDocs(text).map((doc) => doc.key) };
+};
+var RECORD_MAX_BYTES = 30000000;
+var decodeRecord = (encoded, layers) => {
+  try {
+    const inner = layers === 2 ? Buffer.from(encoded, "base64").toString("utf8") : encoded;
+    const bytes = Buffer.from(inner, "base64");
+    const json = bytes.length > 2 && bytes[0] === 31 && bytes[1] === 139 ? gunzipSync(bytes, { maxOutputLength: RECORD_MAX_BYTES }) : bytes;
+    return JSON.parse(json.toString("utf8"));
+  } catch {
+    throw new K8sError("K8S_ERROR", "The release record could not be read.");
+  }
+};
+var readRecord = async (target, namespace, name, revision) => {
+  const id = `sh.helm.release.v1.${name}.v${revision}`;
+  const base = `/api/v1/namespaces/${encodeURIComponent(namespace)}`;
+  try {
+    const secret = await callJson(target, { path: `${base}/secrets/${id}`, timeoutMs: 60000 });
+    if (typeof secret.data?.release === "string")
+      return decodeRecord(secret.data.release, 2);
+  } catch (error) {
+    if (!(error instanceof K8sError) || error.code !== "NOT_FOUND")
+      throw error;
+  }
+  try {
+    const map = await callJson(target, { path: `${base}/configmaps/${id}`, timeoutMs: 60000 });
+    if (typeof map.data?.release === "string")
+      return decodeRecord(map.data.release, 1);
+  } catch (error) {
+    if (!(error instanceof K8sError) || error.code !== "NOT_FOUND")
+      throw error;
+  }
+  throw new K8sError("NOT_FOUND", "The release record was not found. Helm may store releases somewhere other than Secrets.");
+};
+var CHART_MAX_BYTES = 50000000;
+var rebuildProblem = (record) => {
+  const chart = record.chart;
+  const metadata = chart?.metadata;
+  if (!chart || !metadata || typeof metadata.name !== "string" || typeof metadata.version !== "string")
+    return "The release record is incomplete.";
+  const locked = chart.lock?.dependencies;
+  if (Array.isArray(metadata.dependencies) && metadata.dependencies.length > 0 || Array.isArray(locked) && locked.length > 0) {
+    return "This chart has subcharts, which a release does not keep. Pick the chart from a repository.";
+  }
+  if (metadata.type === "library")
+    return "A library chart cannot be installed.";
+  return null;
+};
+var chartFiles = (chart) => {
+  const files = new Map;
+  let total = 0;
+  const add = (path, data) => {
+    if (typeof path !== "string" || !safeChartPath(path))
+      throw new K8sError("INVALID", "The release record holds a file name that is not safe to write.");
+    total += data.length;
+    if (total > CHART_MAX_BYTES)
+      throw new K8sError("INVALID", "The chart in the release record is too large to rebuild.");
+    files.set(path, data);
+  };
+  const list = (value) => Array.isArray(value) ? value : [];
+  for (const file of list(chart.templates))
+    add(file.name, Buffer.from(String(file.data ?? ""), "base64"));
+  for (const file of list(chart.files))
+    add(file.name, Buffer.from(String(file.data ?? ""), "base64"));
+  if (typeof chart.schema === "string" && chart.schema)
+    add("values.schema.json", Buffer.from(chart.schema, "base64"));
+  add("values.yaml", Buffer.from($stringify(chart.values ?? {}, { lineWidth: 0 })));
+  add("Chart.yaml", Buffer.from($stringify(chart.metadata ?? {}, { lineWidth: 0 })));
+  return [...files].map(([path, data]) => ({ path, data }));
+};
+var writeChart = async (dir, files) => {
+  await mkdir(dir, { recursive: true, mode: 448 });
+  for (const file of files) {
+    const target = join5(dir, file.path);
+    await mkdir(dirname(target), { recursive: true, mode: 448 });
+    await writeFile(target, file.data, { mode: 384 });
+  }
+};
+var REPO_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+var repoNames = async () => {
+  try {
+    const out = await helm({ context: "" }, ["repo", "list", "--output", "json"], { noCluster: true, timeoutMs: 20000 });
+    const parsed = JSON.parse(out || "[]");
+    return Array.isArray(parsed) ? parsed.map((entry) => String(entry.name ?? "")).filter((entry) => REPO_NAME.test(entry)) : [];
+  } catch {
+    return [];
+  }
+};
+var chartSources = async (target, namespace, name) => {
+  checkNames(namespace, name);
+  const current = (await releaseHistory(target, namespace, name, 1))[0];
+  if (!current)
+    throw new K8sError("NOT_FOUND", "That release was not found.");
+  const { name: chartName, version: chartVersion } = splitChart(current.chart);
+  const repos = (await repoNames()).slice(0, 8);
+  const searches = REPO_NAME.test(chartName) ? await Promise.all(repos.map(async (repo) => {
+    try {
+      const out = await helm(target, ["search", "repo", `${repo}/${chartName}`, "--versions", "--output", "json"], { noCluster: true, timeoutMs: 20000 });
+      const parsed = JSON.parse(out || "[]");
+      return { repo, results: Array.isArray(parsed) ? parsed : [] };
+    } catch {
+      return { repo, results: [] };
+    }
+  })) : [];
+  const candidates = repoCandidates(chartName, chartVersion, searches);
+  let rebuild;
+  try {
+    const problem = rebuildProblem(await readRecord(target, namespace, name, current.revision));
+    rebuild = problem ? { ok: false, reason: problem } : { ok: true };
+  } catch (error) {
+    rebuild = { ok: false, reason: error instanceof K8sError ? error.message : "The release record could not be read." };
+  }
+  return { revision: current.revision, chartName, chartVersion, candidates, rebuild, default: candidates.length > 0 ? "repo" : rebuild.ok ? "release" : null, repos };
+};
+var parseValuesText = (text) => {
+  let parsed;
+  try {
+    parsed = $parse(text);
+  } catch (error) {
+    throw new K8sError("INVALID", `The values are not valid YAML: ${error instanceof Error ? error.message.split(`
+`)[0] : "check them again."}`);
+  }
+  if (parsed === null || parsed === undefined)
+    return {};
+  if (typeof parsed !== "object" || Array.isArray(parsed))
+    throw new K8sError("INVALID", "The values must be a YAML mapping (keys and values).");
+  return parsed;
+};
+var resolveChart = async (target, namespace, name, request) => {
+  if (request.version !== undefined && !validChartVersion(request.version))
+    throw bad("That chart version is not valid.");
+  if (request.fromRelease)
+    return { source: "release" };
+  if (request.chart) {
+    if (!validChartRef(request.chart))
+      throw bad("Name the chart as repo/chart or an oci:// address.");
+    if (!request.chart.startsWith("oci://")) {
+      const repo = request.chart.split("/")[0];
+      if (!(await repoNames()).includes(repo))
+        throw bad(`The repository "${repo}" is not added to Helm. Add it with helm repo add, then try again.`);
+    }
+    return { source: "repo", ref: request.chart, version: request.version ?? null };
+  }
+  const sources = await chartSources(target, namespace, name);
+  const candidate = sources.candidates[0];
+  if (candidate)
+    return { source: "repo", ref: candidate.ref, version: request.version ?? candidate.version };
+  if (sources.rebuild.ok)
+    return { source: "release" };
+  throw new K8sError("INVALID", sources.rebuild.reason ?? "No chart was found for this release. Name one.");
+};
+var manifestFromDryRun = (output) => {
+  try {
+    const parsed = JSON.parse(output);
+    return { manifest: typeof parsed.manifest === "string" ? parsed.manifest : "", version: String(parsed.chart?.metadata?.version ?? "") };
+  } catch {
+    throw new K8sError("K8S_ERROR", "Helm answered something unreadable.");
+  }
+};
+var upgradeRelease = async (target, namespace, name, request) => {
+  checkNames(namespace, name);
+  const current = (await releaseHistory(target, namespace, name, 1))[0];
+  if (!current)
+    throw new K8sError("NOT_FOUND", "That release was not found.");
+  if (request.expectedRevision !== undefined && current.revision !== request.expectedRevision) {
+    throw new K8sError("CONFLICT", `The release moved from revision ${request.expectedRevision} to ${current.revision} since you checked. Check the change again.`);
+  }
+  const edited = parseValuesText(request.valuesText);
+  const restored = restoreRedacted(edited, await rawValues(target, namespace, name));
+  if (restored.unresolved.length > 0) {
+    throw new K8sError("INVALID", `A hidden value could not be put back (${restored.unresolved.slice(0, 3).join(", ")}). Type the value again instead of <redacted>.`);
+  }
+  const resolved = await resolveChart(target, namespace, name, request);
+  const dir = await mkdtemp(join5(tmpdir(), "k8s-helm-"));
+  try {
+    await chmod(dir, 448);
+    const valuesFile = join5(dir, "values.yaml");
+    await writeFile(valuesFile, $stringify(restored.value ?? {}, { lineWidth: 0 }), { mode: 384 });
+    let chartArg;
+    let version = null;
+    if (resolved.source === "release") {
+      const record = await readRecord(target, namespace, name, current.revision);
+      const problem = rebuildProblem(record);
+      if (problem)
+        throw new K8sError("INVALID", problem);
+      chartArg = join5(dir, "chart");
+      await writeChart(chartArg, chartFiles(record.chart));
+    } else {
+      chartArg = resolved.ref;
+      version = resolved.version;
+    }
+    const args = ["upgrade", name, chartArg, "--reset-values", "--values", valuesFile, ...version ? ["--version", version] : [], ...request.dryRun ? ["--dry-run=server", "--output", "json"] : ["--timeout", "5m"]];
+    const out = await helm(target, args, { namespace, timeoutMs: request.dryRun ? 180000 : 330000, maxBuffer: 128000000 });
+    const chart = { source: resolved.source, ref: resolved.source === "release" ? "the release record" : resolved.ref, version: version ?? splitChart(current.chart).version };
+    if (!request.dryRun)
+      return { dryRun: false, revision: current.revision, chart };
+    const proposed = manifestFromDryRun(out);
+    const before = redactManifest(await rawManifest(target, namespace, name)).text;
+    return { dryRun: true, revision: current.revision, chart: { ...chart, version: proposed.version || chart.version }, diff: diffManifests(before, redactManifest(proposed.manifest).text) };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+};
+var rollbackRelease = async (target, namespace, name, revision, dryRun) => {
+  checkNames(namespace, name);
+  if (!validRevision(revision))
+    throw bad("Pick a revision to roll back to.");
+  const history = await releaseHistory(target, namespace, name);
+  if (!history.some((entry) => entry.revision === revision))
+    throw new K8sError("NOT_FOUND", `Revision ${revision} is no longer in the history.`);
+  if (history[0]?.revision === revision)
+    throw new K8sError("INVALID", `Revision ${revision} is already the current one.`);
+  await helm(target, ["rollback", name, String(revision), ...dryRun ? ["--dry-run=server"] : ["--timeout", "5m"]], { namespace, timeoutMs: dryRun ? 120000 : 330000 });
+  if (!dryRun)
+    return { dryRun, revision };
+  const [now, then] = await Promise.all([rawManifest(target, namespace, name), rawManifest(target, namespace, name, revision)]);
+  return { dryRun, revision, diff: diffManifests(redactManifest(now).text, redactManifest(then).text) };
+};
+var uninstallRelease = async (target, namespace, name, options) => {
+  checkNames(namespace, name);
+  const resources = manifestDocs(redactManifest(await rawManifest(target, namespace, name)).text).map((doc) => doc.key);
+  await helm(target, ["uninstall", name, ...options.keepHistory ? ["--keep-history"] : [], ...options.dryRun ? ["--dry-run"] : ["--timeout", "5m"]], { namespace, timeoutMs: options.dryRun ? 60000 : 330000 });
+  return { dryRun: options.dryRun, resources };
+};
 
 // src/service/kubeconfig.ts
 var ARN = /^arn:aws[a-z-]*:eks:([a-z0-9-]+):(\d{12}):cluster\/(.+)$/;
@@ -9153,12 +9972,12 @@ var parseKubeconfig = (doc) => {
   const current = typeof doc["current-context"] === "string" && doc["current-context"] ? doc["current-context"] : null;
   return { current, contexts };
 };
-var cache = new Map;
-var CACHE_MS = 1e4;
+var cache2 = new Map;
+var CACHE_MS2 = 1e4;
 var loadKubeconfig = async (kubeconfig) => {
   const key = kubeconfig ?? "";
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_MS)
+  const hit = cache2.get(key);
+  if (hit && Date.now() - hit.at < CACHE_MS2)
     return hit.value;
   const out = await run(kubectlPath(), ["config", "view", "-o", "json", ...kubeconfigArgs(kubeconfig)], { timeoutMs: 15000 });
   if (out.code !== 0)
@@ -9170,7 +9989,7 @@ var loadKubeconfig = async (kubeconfig) => {
     throw new K8sError("K8S_ERROR", "kubectl answered something unreadable for your kubeconfig.");
   }
   const value = parseKubeconfig(doc);
-  cache.set(key, { at: Date.now(), value });
+  cache2.set(key, { at: Date.now(), value });
   return value;
 };
 var contextInfo = async (name, kubeconfig) => {
@@ -9183,7 +10002,7 @@ var contextInfo = async (name, kubeconfig) => {
 // src/service/scope.ts
 import { existsSync, readdirSync as readdirSync3, readFileSync as readFileSync4, realpathSync, statSync } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { basename, isAbsolute, join as join5, relative, resolve } from "node:path";
+import { basename, isAbsolute, join as join6, relative, resolve } from "node:path";
 var ENV_FILES = [".envrc", ".env", ".env.local", ".env.development"];
 var SKIP_DIRS = new Set(["node_modules", ".git", "vendor", "dist"]);
 var MAX_DEPTH = 4;
@@ -9212,7 +10031,7 @@ var parseEnvFile = (text) => {
   }
   return out;
 };
-var readAwsProfiles = (configPath = join5(homedir3(), ".aws", "config")) => {
+var readAwsProfiles = (configPath = join6(homedir3(), ".aws", "config")) => {
   let text = "";
   try {
     text = readFileSync4(configPath, "utf8");
@@ -9283,14 +10102,14 @@ var pathIsInside = (child, parent) => {
   const rel = relative(parent, child);
   return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 };
-var expandHome = (value, home) => value === "~" ? home : value.startsWith("~/") ? join5(home, value.slice(2)) : value;
+var expandHome = (value, home) => value === "~" ? home : value.startsWith("~/") ? join6(home, value.slice(2)) : value;
 var envTier = async (dir, deps) => {
   const tier = emptyTier("From env file");
   const env = {};
   for (const file of ENV_FILES) {
     let text;
     try {
-      text = readFileSync4(join5(dir, file), "utf8");
+      text = readFileSync4(join6(dir, file), "utf8");
     } catch {
       continue;
     }
@@ -9384,9 +10203,9 @@ var listFiles = (root) => {
         break;
       if (entry.isDirectory()) {
         if (!SKIP_DIRS.has(entry.name) && depth < MAX_DEPTH)
-          queue.push({ dir: join5(dir, entry.name), depth: depth + 1 });
+          queue.push({ dir: join6(dir, entry.name), depth: depth + 1 });
       } else if (entry.isFile())
-        out.push(join5(dir, entry.name));
+        out.push(join6(dir, entry.name));
     }
   }
   return out;
@@ -9721,20 +10540,20 @@ var closeAllLogs = () => {
 
 // src/service/metrics.ts
 var BASE = "/apis/metrics.k8s.io/v1beta1";
-var CACHE_MS2 = 1e4;
+var CACHE_MS3 = 1e4;
 var DISK_CACHE_MS = 120000;
 var DISK_PARALLEL = 6;
-var cache2 = new Map;
+var cache3 = new Map;
 var cached = async (key, ttl, load) => {
-  const hit = cache2.get(key);
+  const hit = cache3.get(key);
   if (hit && Date.now() - hit.at < ttl)
     return hit.value;
   const value = await load();
-  cache2.set(key, { at: Date.now(), value });
-  if (cache2.size > 200) {
-    for (const [old, entry] of cache2)
+  cache3.set(key, { at: Date.now(), value });
+  if (cache3.size > 200) {
+    for (const [old, entry] of cache3)
       if (Date.now() - entry.at > ttl)
-        cache2.delete(old);
+        cache3.delete(old);
   }
   return value;
 };
@@ -9784,7 +10603,7 @@ var readMetrics = async (target, want) => {
   const answer = { status: "ok", at: null, nodes: [], pods: [] };
   try {
     if (want.nodes) {
-      const nodes = await cached(`${key}|nodes`, CACHE_MS2, async () => compactNodeMetrics(await callJson(target, { path: `${BASE}/nodes`, timeoutMs: 20000 })));
+      const nodes = await cached(`${key}|nodes`, CACHE_MS3, async () => compactNodeMetrics(await callJson(target, { path: `${BASE}/nodes`, timeoutMs: 20000 })));
       let disks = new Map;
       if (want.disk) {
         const read = await cached(`${key}|disk`, DISK_CACHE_MS, () => readDisks(target, nodes.map((node) => node.name)));
@@ -9798,7 +10617,7 @@ var readMetrics = async (target, want) => {
     }
     if (want.pods) {
       const path = want.namespace ? `${BASE}/namespaces/${encodeURIComponent(want.namespace)}/pods` : `${BASE}/pods`;
-      const pods = await cached(`${key}|${path}`, CACHE_MS2, async () => compactPodMetrics(await callJson(target, { path, timeoutMs: 30000 })));
+      const pods = await cached(`${key}|${path}`, CACHE_MS3, async () => compactPodMetrics(await callJson(target, { path, timeoutMs: 30000 })));
       answer.pods = pods.map((pod) => ({ namespace: pod.namespace, name: pod.name, cpu: pod.cpu, memory: pod.memory }));
       for (const pod of pods)
         if (pod.at !== null)
@@ -9818,7 +10637,7 @@ import { spawn as spawn3 } from "node:child_process";
 import { createHash as createHash5 } from "node:crypto";
 import http2 from "node:http";
 import { rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 var PROBE_MS = 6000;
 var QUERY_MS = 20000;
 var FOUND_MS = 10 * 60000;
@@ -9900,7 +10719,7 @@ var ensureForward = async (target, service) => {
     env: childEnv(),
     stdio: ["ignore", "pipe", "pipe"]
   });
-  const pidFile = join6(sockDir(), `fwd-prom-${id}.pid`);
+  const pidFile = join7(sockDir(), `fwd-prom-${id}.pid`);
   if (child.pid) {
     try {
       writeFileSync4(pidFile, String(child.pid), { mode: 384 });
@@ -10083,19 +10902,19 @@ var readCharts = async (target, scope) => {
 var describeDetection = (found) => found.found ? { found: true, namespace: found.service.namespace, service: found.service.name, port: found.service.port, via: found.via, source: found.source } : { found: false, reason: found.reason, source: found.source, tried: found.tried.map((service) => `${service.namespace}/${service.name}:${service.port}`) };
 
 // src/service/routes.ts
-var text3 = (params, key) => {
+var text6 = (params, key) => {
   const value = params[key];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 };
 var need = (params, key) => {
-  const value = text3(params, key);
+  const value = text6(params, key);
   if (!value)
     throw new K8sError("BAD_REQUEST", `Missing "${key}".`);
   return value;
 };
 var flag = (params, key) => params[key] === true || params[key] === "true" || params[key] === "1" || params[key] === 1;
 var namespaceOf = (params) => {
-  const value = text3(params, "namespace");
+  const value = text6(params, "namespace");
   return value && value !== "_all" ? value : null;
 };
 var scopes = createScopeCache((dir) => resolveScope(dir, {
@@ -10106,7 +10925,7 @@ var scopes = createScopeCache((dir) => resolveScope(dir, {
 var scopeFor = (dir) => scopes.get(dir);
 var targetFor = async (params) => {
   const context = need(params, "context");
-  const dir = text3(params, "dir");
+  const dir = text6(params, "dir");
   const kubeconfig = dir ? (await scopeFor(dir))?.kubeconfig : undefined;
   await contextInfo(context, kubeconfig);
   return kubeconfig ? { context, kubeconfig } : { context };
@@ -10130,7 +10949,11 @@ var publishLock = async (params) => {
 };
 var panelObject = (info, object, reveal = false) => forPanel(isSecret(info), object, reveal);
 var audit = (params, target, verb, what) => {
-  appendAudit({ project: text3(params, "dir") ?? null, context: target.context, verb, target: what, source: "panel" });
+  appendAudit({ project: text6(params, "dir") ?? null, context: target.context, verb, target: what, source: "panel" });
+};
+var auditHelmFailure = (params, target, verb, what, error) => {
+  if (error instanceof K8sError && (error.code === "K8S_ERROR" || error.code === "UNREACHABLE" || error.code === "INTERNAL"))
+    audit(params, target, `${verb} (failed)`, what);
 };
 var writeNamespace = async (target, info, params) => {
   if (!info.namespaced)
@@ -10171,7 +10994,7 @@ var refOf = (info, namespace, name) => `${info.kind}/${name}${namespace ? ` in $
 var routes = {
   "GET /health": async () => ({ ok: true }),
   "GET /contexts": async (params) => {
-    const dir = text3(params, "dir");
+    const dir = text6(params, "dir");
     const scope = dir ? await scopeFor(dir) : null;
     const config = await loadKubeconfig(scope?.kubeconfig);
     const locks = readLocks();
@@ -10231,7 +11054,7 @@ var routes = {
     const info = await resolveKind(target, need(params, "kind"));
     const answer = await callJson(target, {
       path: kindPath(info, namespaceOf(params)),
-      query: { labelSelector: text3(params, "selector"), fieldSelector: text3(params, "fieldSelector") },
+      query: { labelSelector: text6(params, "selector"), fieldSelector: text6(params, "fieldSelector") },
       timeoutMs: 60000
     });
     return {
@@ -10250,7 +11073,7 @@ var routes = {
   "POST /watch": async (params) => {
     const target = await targetFor(params);
     const info = await resolveKind(target, need(params, "kind"));
-    return { ok: true, kind: info, ...await openWatch(target, info, namespaceOf(params), text3(params, "fieldSelector") ?? null) };
+    return { ok: true, kind: info, ...await openWatch(target, info, namespaceOf(params), text6(params, "fieldSelector") ?? null) };
   },
   "POST /watch/lease": async (params) => {
     const ids = Array.isArray(params.watchIds) ? params.watchIds.filter((id) => typeof id === "string") : [];
@@ -10499,7 +11322,7 @@ var routes = {
     const target = await targetFor(params);
     const dryRun = flag(params, "dryRun");
     await guard(target, dryRun);
-    const info = await resolveKind(target, need(params, "kind"), text3(params, "apiVersion"));
+    const info = await resolveKind(target, need(params, "kind"), text6(params, "apiVersion"));
     if (info.kind !== "CronJob" && !/toolkit\.fluxcd\.io/.test(info.group))
       throw new K8sError("INVALID", `${info.kind} cannot be suspended.`);
     const namespace = await writeNamespace(target, info, params);
@@ -10520,7 +11343,7 @@ var routes = {
     const target = await targetFor(params);
     const dryRun = flag(params, "dryRun");
     await guard(target, dryRun);
-    const info = await resolveKind(target, need(params, "kind"), text3(params, "apiVersion"));
+    const info = await resolveKind(target, need(params, "kind"), text6(params, "apiVersion"));
     if (!/toolkit\.fluxcd\.io/.test(info.group))
       throw new K8sError("INVALID", `${info.kind} is not a Flux resource.`);
     const action = need(params, "action");
@@ -10543,7 +11366,7 @@ var routes = {
     const target = await targetFor(params);
     const dryRun = flag(params, "dryRun");
     await guard(target, dryRun);
-    const info = await resolveKind(target, need(params, "kind"), text3(params, "apiVersion") ?? "argoproj.io/v1alpha1");
+    const info = await resolveKind(target, need(params, "kind"), text6(params, "apiVersion") ?? "argoproj.io/v1alpha1");
     if (!info.group.startsWith("argoproj.io"))
       throw new K8sError("INVALID", `${info.kind} is not an Argo CD resource.`);
     const action = need(params, "action");
@@ -10556,7 +11379,7 @@ var routes = {
       path: kindPath(info, namespace, name),
       query: { dryRun: dryRun ? "All" : undefined },
       contentType: "application/merge-patch+json",
-      body: JSON.stringify(argoPatch(action, text3(params, "revision")))
+      body: JSON.stringify(argoPatch(action, text6(params, "revision")))
     });
     if (!dryRun)
       audit(params, target, `argo ${action}`, refOf(info, namespace, name));
@@ -10566,7 +11389,7 @@ var routes = {
     const target = await targetFor(params);
     const namespace = need(params, "namespace");
     const pod = need(params, "pod");
-    const container = text3(params, "container");
+    const container = text6(params, "container");
     const command = need(params, "command");
     if (command.length > 4000)
       throw new K8sError("BAD_REQUEST", "A command can hold at most 4000 characters.");
@@ -10582,7 +11405,7 @@ var routes = {
       target,
       namespace,
       pod,
-      container: text3(params, "container"),
+      container: text6(params, "container"),
       previous: flag(params, "previous"),
       timestamps: flag(params, "timestamps"),
       tailLines: Number(params.tailLines) || 500
@@ -10597,7 +11420,7 @@ var routes = {
     return { ok: true, known, unknown };
   },
   "POST /logs/stop": async (params) => {
-    const id = text3(params, "streamId");
+    const id = text6(params, "streamId");
     if (id)
       stopLogs(id);
     return { ok: true };
@@ -10674,10 +11497,110 @@ var routes = {
       throw new K8sError("BAD_REQUEST", "Charts are for a pod, a workload or a node.");
     return { ok: true, ...await readCharts(target, chart) };
   },
+  "GET /crds": async (params) => {
+    const target = await targetFor(params);
+    return { ok: true, crds: await readCrds(target, flag(params, "refresh")) };
+  },
+  "GET /helm/releases": async (params) => {
+    const target = await targetFor(params);
+    return { ok: true, releases: await listReleases(target, namespaceOf(params)) };
+  },
+  "GET /helm/values": async (params) => {
+    const target = await targetFor(params);
+    const revision = params.revision === undefined || params.revision === "" ? undefined : Number(params.revision);
+    return { ok: true, values: await panelValues(target, need(params, "namespace"), need(params, "name"), { all: flag(params, "all"), ...revision === undefined ? {} : { revision } }) };
+  },
+  "GET /helm/manifest": async (params) => {
+    const target = await targetFor(params);
+    const revision = params.revision === undefined || params.revision === "" ? undefined : Number(params.revision);
+    return { ok: true, ...await panelManifest(target, need(params, "namespace"), need(params, "name"), revision) };
+  },
+  "GET /helm/history": async (params) => {
+    const target = await targetFor(params);
+    return { ok: true, history: await releaseHistory(target, need(params, "namespace"), need(params, "name")) };
+  },
+  "GET /helm/chart-source": async (params) => {
+    const target = await targetFor(params);
+    return { ok: true, ...await chartSources(target, need(params, "namespace"), need(params, "name")) };
+  },
+  "POST /helm/rollback": async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, "dryRun");
+    await guard(target, dryRun);
+    const namespace = need(params, "namespace");
+    const name = need(params, "name");
+    const what = `Release/${name} in ${namespace}`;
+    let result;
+    try {
+      result = await rollbackRelease(target, namespace, name, Number(params.revision), dryRun);
+    } catch (error) {
+      if (!dryRun)
+        auditHelmFailure(params, target, `helm rollback to ${String(params.revision)}`, what, error);
+      throw error;
+    }
+    if (!dryRun)
+      audit(params, target, `helm rollback to ${result.revision}`, what);
+    return { ok: true, ...result };
+  },
+  "POST /helm/upgrade": async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, "dryRun");
+    await guard(target, dryRun);
+    const namespace = need(params, "namespace");
+    const name = need(params, "name");
+    const values = typeof params.values === "string" ? params.values : "";
+    if (values.length > 1e6)
+      throw new K8sError("BAD_REQUEST", "The values are too large (1 MB at most).");
+    const expected = params.expectedRevision === undefined || params.expectedRevision === null || params.expectedRevision === "" ? undefined : Number(params.expectedRevision);
+    if (expected !== undefined && !Number.isInteger(expected))
+      throw new K8sError("BAD_REQUEST", "The revision is not a number.");
+    const chart = text6(params, "chart");
+    const version = text6(params, "version");
+    const what = `Release/${name} in ${namespace}`;
+    let result;
+    try {
+      result = await upgradeRelease(target, namespace, name, {
+        valuesText: values,
+        dryRun,
+        ...chart ? { chart } : {},
+        ...version ? { version } : {},
+        ...flag(params, "fromRelease") ? { fromRelease: true } : {},
+        ...expected === undefined ? {} : { expectedRevision: expected }
+      });
+    } catch (error) {
+      if (!dryRun)
+        auditHelmFailure(params, target, "helm upgrade", what, error);
+      throw error;
+    }
+    if (!dryRun)
+      audit(params, target, `helm upgrade (${result.chart.source === "release" ? "chart from the release record" : `${result.chart.ref} ${result.chart.version}`})`, what);
+    return { ok: true, ...result };
+  },
+  "POST /helm/uninstall": async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, "dryRun");
+    await guard(target, dryRun);
+    const namespace = need(params, "namespace");
+    const name = need(params, "name");
+    const keepHistory = flag(params, "keepHistory");
+    const what = `Release/${name} in ${namespace}`;
+    const verb = keepHistory ? "helm uninstall (keep history)" : "helm uninstall";
+    let result;
+    try {
+      result = await uninstallRelease(target, namespace, name, { keepHistory, dryRun });
+    } catch (error) {
+      if (!dryRun)
+        auditHelmFailure(params, target, verb, what, error);
+      throw error;
+    }
+    if (!dryRun)
+      audit(params, target, verb, what);
+    return { ok: true, ...result };
+  },
   "GET /audit": async (params) => {
     const limit = Math.min(500, Math.max(1, Number(params.limit) || 100));
-    const project = text3(params, "dir");
-    const context = text3(params, "context");
+    const project = text6(params, "dir");
+    const context = text6(params, "context");
     const entries = readAudit(limit * 4).map(parseAuditLine).filter((entry) => entry !== null).filter((entry) => (!project || entry.project === project) && (!context || entry.context === context)).slice(-limit).reverse();
     return { ok: true, entries };
   }

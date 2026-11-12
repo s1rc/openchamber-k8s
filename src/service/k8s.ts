@@ -166,7 +166,13 @@ const fromResources = (group: string, version: string, resources: Resource[]): K
     .filter((resource) => !resource.name.includes('/'))
     .map((resource) => ({ kind: resource.kind, plural: resource.name, group, version, namespaced: resource.namespaced, aliases: [...(resource.shortNames ?? []), ...(resource.singularName ? [resource.singularName] : [])].map((text) => text.toLowerCase()) }));
 
-const discoverAll = async (target: Target): Promise<KindInfo[]> => {
+/** Drops the kept discovery of a cluster, so a CRD installed a moment ago is found. */
+export const forgetDiscovery = (target: Target): void => {
+  discovery.delete(targetKey(target));
+};
+
+/** Every kind the cluster serves, found through discovery and kept for ten minutes. */
+export const discoverAll = async (target: Target): Promise<KindInfo[]> => {
   const key = targetKey(target);
   const hit = discovery.get(key);
   if (hit && Date.now() - hit.at < DISCOVERY_MS) return hit.kinds;

@@ -19,6 +19,8 @@ import type { ForwardKind, Obj, ScopeResult, Target } from '../shared/types.ts';
 import { parseAllDocuments } from 'yaml';
 import { K8sError } from './errors.ts';
 import { callJson, resolveKind } from './k8s.ts';
+import { readCrds } from './crds.ts';
+import { chartSources, listReleases, panelManifest, panelValues, releaseHistory, rollbackRelease, uninstallRelease, upgradeRelease } from './helm.ts';
 import { contextInfo, loadKubeconfig } from './kubeconfig.ts';
 import { createScopeCache, readAwsProfiles, resolveScope } from './scope.ts';
 import { appendAudit, readAudit, readLocks, readPicks, writeLocks, writePick } from './state.ts';
@@ -95,6 +97,11 @@ const panelObject = (info: KindInfo, object: Obj, reveal = false): Obj => forPan
 
 const audit = (params: Params, target: Target, verb: string, what: string): void => {
   appendAudit({ project: text(params, 'dir') ?? null, context: target.context, verb, target: what, source: 'panel' });
+};
+
+/** A Helm change that failed after helm started it may still have left a failed revision, so it is written to the audit log too. */
+const auditHelmFailure = (params: Params, target: Target, verb: string, what: string, error: unknown): void => {
+  if (error instanceof K8sError && (error.code === 'K8S_ERROR' || error.code === 'UNREACHABLE' || error.code === 'INTERNAL')) audit(params, target, `${verb} (failed)`, what);
 };
 
 const writeNamespace = async (target: Target, info: KindInfo, params: Params): Promise<string | null> => {
@@ -644,6 +651,112 @@ export const routes: Record<string, RouteHandler> = {
     else if (scope === 'workload') chart = { scope: 'workload', kind: need(params, 'kind'), namespace: need(params, 'namespace'), name };
     else throw new K8sError('BAD_REQUEST', 'Charts are for a pod, a workload or a node.');
     return { ok: true, ...(await readCharts(target, chart)) };
+  },
+
+  /** The cluster's custom resource definitions, compact: what the navigation and the custom resource tables need. */
+  'GET /crds': async (params) => {
+    const target = await targetFor(params);
+    return { ok: true, crds: await readCrds(target, flag(params, 'refresh')) };
+  },
+
+  /** Helm releases, one namespace or all. Read through the helm program; nothing here is live, the panel asks again. */
+  'GET /helm/releases': async (params) => {
+    const target = await targetFor(params);
+    return { ok: true, releases: await listReleases(target, namespaceOf(params)) };
+  },
+
+  /** The values of a release with every secret-looking value hidden. `all=1` gives the computed values too. */
+  'GET /helm/values': async (params) => {
+    const target = await targetFor(params);
+    const revision = params.revision === undefined || params.revision === '' ? undefined : Number(params.revision);
+    return { ok: true, values: await panelValues(target, need(params, 'namespace'), need(params, 'name'), { all: flag(params, 'all'), ...(revision === undefined ? {} : { revision }) }) };
+  },
+
+  /** The rendered manifest of a release with every Secret document hidden. */
+  'GET /helm/manifest': async (params) => {
+    const target = await targetFor(params);
+    const revision = params.revision === undefined || params.revision === '' ? undefined : Number(params.revision);
+    return { ok: true, ...(await panelManifest(target, need(params, 'namespace'), need(params, 'name'), revision)) };
+  },
+
+  'GET /helm/history': async (params) => {
+    const target = await targetFor(params);
+    return { ok: true, history: await releaseHistory(target, need(params, 'namespace'), need(params, 'name')) };
+  },
+
+  /** Where an upgrade would get the chart: a repository with this exact version, or the release record. */
+  'GET /helm/chart-source': async (params) => {
+    const target = await targetFor(params);
+    return { ok: true, ...(await chartSources(target, need(params, 'namespace'), need(params, 'name'))) };
+  },
+
+  'POST /helm/rollback': async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, 'dryRun');
+    await guard(target, dryRun);
+    const namespace = need(params, 'namespace');
+    const name = need(params, 'name');
+    const what = `Release/${name} in ${namespace}`;
+    let result;
+    try {
+      result = await rollbackRelease(target, namespace, name, Number(params.revision), dryRun);
+    } catch (error) {
+      if (!dryRun) auditHelmFailure(params, target, `helm rollback to ${String(params.revision)}`, what, error);
+      throw error;
+    }
+    if (!dryRun) audit(params, target, `helm rollback to ${result.revision}`, what);
+    return { ok: true, ...result };
+  },
+
+  'POST /helm/upgrade': async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, 'dryRun');
+    await guard(target, dryRun);
+    const namespace = need(params, 'namespace');
+    const name = need(params, 'name');
+    const values = typeof params.values === 'string' ? params.values : '';
+    if (values.length > 1_000_000) throw new K8sError('BAD_REQUEST', 'The values are too large (1 MB at most).');
+    const expected = params.expectedRevision === undefined || params.expectedRevision === null || params.expectedRevision === '' ? undefined : Number(params.expectedRevision);
+    if (expected !== undefined && !Number.isInteger(expected)) throw new K8sError('BAD_REQUEST', 'The revision is not a number.');
+    const chart = text(params, 'chart');
+    const version = text(params, 'version');
+    const what = `Release/${name} in ${namespace}`;
+    let result;
+    try {
+      result = await upgradeRelease(target, namespace, name, {
+        valuesText: values,
+        dryRun,
+        ...(chart ? { chart } : {}),
+        ...(version ? { version } : {}),
+        ...(flag(params, 'fromRelease') ? { fromRelease: true } : {}),
+        ...(expected === undefined ? {} : { expectedRevision: expected }),
+      });
+    } catch (error) {
+      if (!dryRun) auditHelmFailure(params, target, 'helm upgrade', what, error);
+      throw error;
+    }
+    if (!dryRun) audit(params, target, `helm upgrade (${result.chart.source === 'release' ? 'chart from the release record' : `${result.chart.ref} ${result.chart.version}`})`, what);
+    return { ok: true, ...result };
+  },
+
+  'POST /helm/uninstall': async (params) => {
+    const target = await targetFor(params);
+    const dryRun = flag(params, 'dryRun');
+    await guard(target, dryRun);
+    const namespace = need(params, 'namespace');
+    const name = need(params, 'name');
+    const keepHistory = flag(params, 'keepHistory');
+    const what = `Release/${name} in ${namespace}`;
+    const verb = keepHistory ? 'helm uninstall (keep history)' : 'helm uninstall';
+    let result;
+    try {
+      result = await uninstallRelease(target, namespace, name, { keepHistory, dryRun });
+    } catch (error) {
+      if (!dryRun) auditHelmFailure(params, target, verb, what, error);
+      throw error;
+    }
+    if (!dryRun) audit(params, target, verb, what);
+    return { ok: true, ...result };
   },
 
   'GET /audit': async (params) => {

@@ -96,6 +96,14 @@ describe('navigation', () => {
     expect(DEFAULT_KIND).toBe('ClusterOverview');
   });
 
+  test('Helm is a special entry between Events and Access control, in Lens order', () => {
+    expect(NAV.map((section) => section.id)).toEqual(['cluster', 'nodes', 'workloads', 'config', 'network', 'storage', 'namespaces', 'events', 'helm', 'access', 'crds', 'forwards']);
+    expect(NAV.find((section) => section.id === 'helm')).toMatchObject({ heading: true, items: [{ kind: 'HelmReleases', title: 'Releases' }] });
+    expect(SPECIAL_KINDS.has('HelmReleases')).toBe(true);
+    expect(findKind('HelmReleases')).toBeUndefined();
+    expect(navLabel('HelmReleases')).toEqual({ section: 'Helm', title: 'Releases' });
+  });
+
   test('the default kind is in the navigation and has a label', () => {
     expect(navKinds).toContain(DEFAULT_KIND);
     expect(navLabel('ClusterOverview')).toEqual({ section: 'Cluster', title: 'Overview' });

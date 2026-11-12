@@ -1,7 +1,9 @@
 import type { HostReadyContext } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
 import { useEffect, useMemo, useState } from 'preact/hooks';
-import { CLUSTER_OVERVIEW, DEFAULT_KIND, NAV, WORKLOADS_OVERVIEW } from '../shared/kinds.ts';
+import { buildNav, crWatchKind, crId, isCrKind, viewForCrd } from '../shared/crds.ts';
+import { HELM_RELEASES } from '../shared/helm.ts';
+import { CLUSTER_OVERVIEW, DEFAULT_KIND, WORKLOADS_OVERVIEW } from '../shared/kinds.ts';
 import type { Obj, ScopeResult } from '../shared/types.ts';
 import { ActivityView } from './ActivityView.tsx';
 import { Dock, type DockTab } from './dock/Dock.tsx';
@@ -10,12 +12,14 @@ import { ForwardsSection } from './ForwardsSection.tsx';
 import { Header, type ContextRow } from './Header.tsx';
 import { call, host, notify } from './host.ts';
 import { Button, Empty, Select, Spinner } from './kit.tsx';
+import { HelmReleases } from './helm/HelmReleases.tsx';
 import { LockBanner } from './LockBanner.tsx';
 import { Modal } from './Modal.tsx';
 import { Nav } from './Nav.tsx';
 import { ClusterOverview } from './overview/ClusterOverview.tsx';
 import { WorkloadsOverview } from './overview/WorkloadsOverview.tsx';
 import { ResourceView } from './ResourceView.tsx';
+import { useCrds } from './useCrds.ts';
 import type { Live } from './useWatch.ts';
 import { onLock } from './watches.ts';
 
@@ -177,7 +181,21 @@ export const App = () => {
     setDockActive((current) => (current === id ? null : current));
   };
 
-  const sectionOptions = useMemo(() => NAV.flatMap((section) => section.items.map((item) => ({ id: item.kind, label: item.title, hint: section.title }))), []);
+  const crds = useCrds(sel.context, dir);
+  const nav = useMemo(() => buildNav(crds.crds ?? []), [crds.crds]);
+  const sectionOptions = useMemo(() => nav.flatMap((section) => section.items.map((item) => ({ id: item.kind, label: item.title, hint: section.title }))), [nav]);
+  const crEntry = useMemo(() => (isCrKind(kind) ? (crds.crds?.find((entry) => crId(entry) === kind) ?? null) : null), [kind, crds.crds]);
+  const crView = useMemo(() => (crEntry ? viewForCrd(crEntry) : null), [crEntry]);
+
+  // Opening Definitions reads the CRD list again, so a CRD installed since shows up in the navigation.
+  useEffect(() => {
+    if (kind === 'CustomResourceDefinition' && sel.context) crds.reload();
+  }, [kind, sel.context]);
+
+  // A custom resource from another cluster, or one that was removed: back to the overview.
+  useEffect(() => {
+    if (isCrKind(kind) && crds.crds !== null && !crEntry) setKind(DEFAULT_KIND);
+  }, [kind, crds.crds, crEntry]);
 
   if (!ctx || boot.phase === 'loading') return <div class="k8s-center k8s-fill"><Spinner label="Loading clusters" /></div>;
   if (boot.phase === 'error') return <ErrorState error={boot.error} context={null} onRetry={() => void load(true, dir)} />;
@@ -208,6 +226,10 @@ export const App = () => {
     let view;
     if (kind === CLUSTER_OVERVIEW) {
       view = <ClusterOverview key={sel.context} context={sel.context} dir={dir} layout={layout} lead={lead} onLive={setLive} onNavigate={setKind} />;
+    } else if (kind === HELM_RELEASES) {
+      view = <HelmReleases key={`${sel.context}|${sel.namespace}`} context={sel.context} namespace={sel.namespace} dir={dir} layout={layout} lead={lead} onLive={setLive} />;
+    } else if (isCrKind(kind) && !crEntry) {
+      view = <div class="k8s-center k8s-fill"><Spinner label="Reading the custom resources" /></div>;
     } else if (kind === WORKLOADS_OVERVIEW) {
       view = <WorkloadsOverview key={`${sel.context}|${sel.namespace}`} context={sel.context} namespace={sel.namespace} dir={dir} layout={layout} lead={lead} onLive={setLive} onNavigate={setKind} />;
     } else {
@@ -217,6 +239,8 @@ export const App = () => {
           context={sel.context}
           namespace={sel.namespace}
           kind={kind}
+          watchKind={crEntry ? crWatchKind(kind) : undefined}
+          view={crView ?? undefined}
           dir={dir}
           layout={layout}
           onLive={setLive}
@@ -226,7 +250,7 @@ export const App = () => {
         />
       );
     }
-    main = layout === 'page' ? <div class="k8s-body"><Nav kind={kind} onPick={setKind} /><div class="k8s-content">{view}</div></div> : view;
+    main = layout === 'page' ? <div class="k8s-body"><Nav nav={nav} kind={kind} onPick={setKind} /><div class="k8s-content">{view}</div></div> : view;
   }
 
   return (
