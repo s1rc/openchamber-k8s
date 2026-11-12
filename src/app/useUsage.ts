@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { emptyUsage, usageFromReply, type UsageSet } from '../shared/metrics.ts';
 import { call } from './host.ts';
+import { onLeaseTick } from './watches.ts';
 
 export interface UsageSpec {
   context: string;
@@ -20,12 +21,12 @@ export interface UsageView {
   refresh: () => void;
 }
 
-/** A page that has been hidden and shows again reads usage once more when its numbers are this old. */
+/** A lease tick reads usage again only when the numbers are older than this, so a tick right after a read does nothing. */
 const STALE_MS = 20_000;
 
 /**
- * Current usage from metrics-server. It cannot be watched, so this reads when the view opens, when the panel becomes
- * visible again with old numbers, and when the user presses Refresh. There is no timer.
+ * Current usage from metrics-server. It cannot be watched, so this reads when the view opens, on every lease tick
+ * (the panel's one timer, 30 s, only while visible) when the numbers are old, and when the user presses Refresh.
  */
 export const useUsage = (spec: UsageSpec): UsageView => {
   const [usage, setUsage] = useState<UsageSet>(() => emptyUsage('loading'));
@@ -61,14 +62,13 @@ export const useUsage = (spec: UsageSpec): UsageView => {
       else setUsage({ ...emptyUsage('unavailable'), message: String(reply.error ?? 'Usage could not be read.') });
     };
     readRef.current = () => void read();
-    const onVisible = (): void => {
+    const stopTick = onLeaseTick(() => {
       if (document.visibilityState === 'visible' && Date.now() - readAt > STALE_MS) void read();
-    };
-    document.addEventListener('visibilitychange', onVisible);
+    });
     void read();
     return () => {
       cancelled = true;
-      document.removeEventListener('visibilitychange', onVisible);
+      stopTick();
     };
   }, [key]);
 

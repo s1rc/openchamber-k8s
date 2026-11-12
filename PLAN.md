@@ -520,16 +520,17 @@ Checked live on staging:
 Decisions and changes from the plan:
 
 - Prometheus transport: proxy first, then a hidden port forward (above). The first detection on staging takes about 8 seconds (6 s proxy timeout, then the forward); after that it is cached for 10 minutes.
-- Usage has no timer. metrics-server cannot be watched, so usage is read when a view opens, when the panel becomes visible again with numbers older than 20 seconds, and on Refresh usage. The overviews and tables update live for everything else. If you want usage to follow the lease timer instead, it is one `setInterval` in `useUsage.ts`.
+- Usage follows the lease timer (your decision after review). metrics-server cannot be watched, so usage is read when a view opens, on every lease tick (30 s, only while the panel is visible, and only when the numbers are older than 20 s), and on Refresh usage. It is the same single timer, not a new one. Node disk is cached for 2 minutes in the service, so a tick costs one metrics call, not one kubelet call per node.
 - Disk usage comes from the kubelet through the API server (metrics-server has none), not from Prometheus. A node whose kubelet does not answer shows allocatable instead and the bar says "Disk usage is not readable here".
 - Pod and workload Filesystem: this Prometheus has `container_fs_usage_bytes` only for the node root (containerd on EKS), so the chart falls back to `kubelet_container_log_filesystem_used_bytes` and says so ("This cluster does not report disk use per container. Showing the size of the log files instead.").
 - Percent charts (node CPU) start from the data's scale (at least 0 to 10%) and stop at 100%, so a quiet node is not a flat line. Byte charts round in steps of 1024.
 - "Prometheus service" override lives in the Cluster overview ("Change service", "Choose service") and in an empty Metrics tab, not in a context menu (the header has no context menu).
-- The Cluster overview opens a Prometheus detection as soon as it is shown (a read of Services plus a probe, and a hidden forward if the proxy fails). It is the default section, so that happens on every cluster you open. Tell me if you would rather detect only when a Metrics tab or "Look again" asks.
+- (Kept as is after review.) The Cluster overview opens a Prometheus detection as soon as it is shown (a read of Services plus a probe, and a hidden forward if the proxy fails). It is the default section, so that happens on every cluster you open. Tell me if you would rather detect only when a Metrics tab or "Look again" asks.
 - The page layout's bottom dock keeps its 300px, so on a short window the overview scrolls. Resize the dock or close it to see more.
 
 Not verified:
 
+- The 30 s usage refresh on the lease tick (added after review): built, typechecked and built into the bundle, but not watched live. Check in the app: open Cluster Overview or Nodes, wait up to a minute, and "usage as of" should move on its own.
 - A cluster whose API server can reach Prometheus through the service proxy (`via: proxy`): staging cannot, so that path only has the code and the unit tests. Same for a real cluster with no metrics-server or no Prometheus: those states were drawn with injected answers in the scratch harness, and the service mapping (`NOT_FOUND`, 503 and `FORBIDDEN` to `missing`, `unavailable`, `forbidden`) is unit-tested.
 - `container_cpu` and network charts for a DaemonSet, StatefulSet or Job (no workload of those kinds was opened on staging beyond the name patterns in tests); node charts on a cluster without node_exporter.
 - A service crash (not a normal stop) with a hidden forward open: the next start removes `fwd-prom-*.pid` files the same way as for forwards, but a killed service was not simulated here.

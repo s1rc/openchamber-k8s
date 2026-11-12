@@ -49,6 +49,7 @@ const early = new Map<string, { at: number; messages: WatchMessage[] }>();
 const earlyLogs = new Map<string, { at: number; messages: LogMessage[] }>();
 const lockListeners = new Set<(message: LockMessage) => void>();
 const forwardListeners = new Set<(forwards: ForwardView[]) => void>();
+const leaseListeners = new Set<() => void>();
 let listening = false;
 let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -115,8 +116,18 @@ export const onForwards = (listener: (forwards: ForwardView[]) => void): (() => 
   };
 };
 
+/** Called on every lease tick (every 30 s while the panel is visible, and when it becomes visible). Usage numbers refresh here, so there is still only one timer. */
+export const onLeaseTick = (listener: () => void): (() => void) => {
+  listen();
+  leaseListeners.add(listener);
+  return () => {
+    leaseListeners.delete(listener);
+  };
+};
+
 /** Renews every live view's lease. A watch or log stream the service dropped is told to open again. */
 export const renew = async (): Promise<void> => {
+  for (const listener of [...leaseListeners]) listener();
   const watchIds = [...subscribers.keys()];
   const streamIds = [...logSubscribers.keys()];
   if (watchIds.length === 0 && streamIds.length === 0) return;

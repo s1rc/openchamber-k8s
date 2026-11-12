@@ -9722,7 +9722,7 @@ var closeAllLogs = () => {
 // src/service/metrics.ts
 var BASE = "/apis/metrics.k8s.io/v1beta1";
 var CACHE_MS2 = 1e4;
-var DISK_CACHE_MS = 30000;
+var DISK_CACHE_MS = 120000;
 var DISK_PARALLEL = 6;
 var cache2 = new Map;
 var cached = async (key, ttl, load) => {

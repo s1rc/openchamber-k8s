@@ -9,7 +9,7 @@ import { targetKey } from './proxy.ts';
 
 const BASE = '/apis/metrics.k8s.io/v1beta1';
 const CACHE_MS = 10_000;
-const DISK_CACHE_MS = 30_000;
+const DISK_CACHE_MS = 120_000;
 const DISK_PARALLEL = 6;
 
 export interface MetricsAnswer {
