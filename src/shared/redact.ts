@@ -56,6 +56,67 @@ export const REDACTED = '<redacted>';
 const SENSITIVE_KEY = /(password|secret|token|key|credential)/i;
 export const isSensitiveKey = (key: string): boolean => SENSITIVE_KEY.test(key);
 
+// A secret can also sit inside text: a ConfigMap that holds a config file, an environment variable, a string in the values.
+// `maskLooseSecrets` finds `password: abc`, `API_TOKEN="abc"` and `"apiKey": "abc"` in any text and hides the value.
+const LOOSE_WORDS = 'password|passwd|passphrase|token|api[_-]?key|secret[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?';
+const LOOSE = new RegExp(`((?:^|[\\s'"{,\\\\])[\\w.-]*?(?:${LOOSE_WORDS})[\\w.-]*)(["']?\\s*[:=]\\s*)('[^']*'|"[^"]*"|[^\\s'",}\\\\]+)`, 'gi');
+// A key that names where a secret lives, not the secret itself.
+const LOOSE_NOT_A_VALUE_KEY = /(name|ref|file|path|from|checksum|hash|enabled|ttl|expir\w*|type|url|namespace|selector|length|size|rotation|policy|version|mode|interval|period|id)$/i;
+const LOOSE_NOT_A_SECRET_VALUE = /^(true|false|null|none|nil|~|\[\]|\{\})$/i;
+
+const unquote = (value: string): { inner: string; open: string; close: string } => {
+  const quote = value[0];
+  if ((quote === "'" || quote === '"') && value.length >= 2 && value.endsWith(quote)) return { inner: value.slice(1, -1), open: quote, close: quote };
+  return { inner: value, open: '', close: '' };
+};
+
+/** Whether a value is worth hiding: not a placeholder, a boolean, a path or a reference. */
+const worthHiding = (value: string): boolean =>
+  value.length >= 4 && !LOOSE_NOT_A_SECRET_VALUE.test(value) && !value.startsWith('<redacted') && !value.startsWith('{{') && !value.startsWith('$') && !/^[./~]/.test(value);
+
+export interface Masked {
+  text: string;
+  /** The values that were hidden, in order. The upgrade route uses them to put a value back. */
+  values: string[];
+}
+
+/** Hides the value of every secret-looking `key: value` or `key=value` in a piece of text. */
+export const maskLooseSecrets = (text: string): Masked => {
+  const values: string[] = [];
+  const masked = text.replace(LOOSE, (all, head: string, middle: string, raw: string) => {
+    const key = head.replace(/^[\s'"{,\\]/, '');
+    if (LOOSE_NOT_A_VALUE_KEY.test(key)) return all;
+    const { inner, open, close } = unquote(raw);
+    if (!worthHiding(inner)) return all;
+    values.push(inner);
+    return `${head}${middle}${open}${REDACTED}${close}`;
+  });
+  return { text: masked, values };
+};
+
+/** Whether a name looks like it holds a secret, for an environment variable written as `name: X` then `value: y`. */
+const secretLikeName = (name: string): boolean => new RegExp(`(${LOOSE_WORDS})`, 'i').test(name) && !LOOSE_NOT_A_VALUE_KEY.test(name);
+
+/** Masks the lines of one manifest document, including an env entry whose `name` looks secret and whose `value` follows it. */
+const maskDocumentLines = (lines: string[]): { lines: string[]; masked: number } => {
+  let masked = 0;
+  const out = lines.map((line) => {
+    const result = maskLooseSecrets(line);
+    masked += result.values.length;
+    return result.text;
+  });
+  for (let i = 0; i + 1 < out.length; i += 1) {
+    const name = /^\s*-?\s*name:\s*["']?([\w.-]+)["']?\s*$/.exec(out[i]!);
+    const value = name && secretLikeName(name[1]!) ? /^(\s*)value:\s*(.+?)\s*$/.exec(out[i + 1]!) : null;
+    if (!value) continue;
+    const { inner, open, close } = unquote(value[2]!);
+    if (!worthHiding(inner)) continue;
+    out[i + 1] = `${value[1]}value: ${open}${REDACTED}${close}`;
+    masked += 1;
+  }
+  return { lines: out, masked };
+};
+
 /**
  * Release values with every secret-looking value hidden. A key that matches hides every text and number below it
  * (booleans, null and empty text stay, they hold nothing). An entry of the `{ name: DB_PASSWORD, value: x }` shape
@@ -71,6 +132,7 @@ export const redactValues = (value: unknown, hide = false): unknown => {
     return out;
   }
   if (hide && ((typeof value === 'string' && value !== '') || typeof value === 'number' || typeof value === 'bigint')) return REDACTED;
+  if (typeof value === 'string') return maskLooseSecrets(value).text;
   return value;
 };
 
@@ -86,6 +148,18 @@ export const restoreRedacted = (edited: unknown, original: unknown): { value: un
   const walk = (node: unknown, before: unknown, path: Array<string | number>): unknown => {
     if (node === REDACTED) {
       if (before !== undefined && before !== null && typeof before !== 'object') return before;
+      unresolved.push(pathText(path));
+      return node;
+    }
+    if (typeof node === 'string' && node.includes(REDACTED) && typeof before === 'string') {
+      // A string with a secret inside it: the hidden values come back in order, when the count matches what was hidden.
+      const hidden = maskLooseSecrets(before).values;
+      const parts = node.split(REDACTED);
+      if (parts.length - 1 === hidden.length) return parts.reduce((text, part, index) => text + part + (index < hidden.length ? hidden[index]! : ''), '');
+      unresolved.push(pathText(path));
+      return node;
+    }
+    if (typeof node === 'string' && node.includes(REDACTED)) {
       unresolved.push(pathText(path));
       return node;
     }
@@ -134,16 +208,24 @@ const redactDocument = (lines: string[]): { lines: string[]; secrets: number } =
 
 /**
  * A rendered Helm manifest with every `kind: Secret` document hidden: the keys stay, each value reads
- * `<redacted, N bytes>`. Every other document is kept as it was, comments included.
+ * `<redacted, N bytes>`. In every other document a value that looks like a secret (`password: x`, `API_TOKEN=x`, an env
+ * entry named like one) reads `<redacted>`; the rest is kept as it was, comments included.
  */
-export const redactManifest = (manifest: string): { text: string; secrets: number } => {
+export const redactManifest = (manifest: string): { text: string; secrets: number; masked: number } => {
   const out: string[] = [];
   let secrets = 0;
+  let masked = 0;
   let current: string[] = [];
   const flush = (): void => {
     if (current.length === 0) return;
     const result = redactDocument(current);
-    out.push(...result.lines);
+    if (result.secrets > 0) out.push(...result.lines);
+    else {
+      // Not a Secret, but it may hold one in text (a ConfigMap with a config file, an env var).
+      const loose = maskDocumentLines(result.lines);
+      out.push(...loose.lines);
+      masked += loose.masked;
+    }
     secrets += result.secrets;
     current = [];
   };
@@ -154,5 +236,5 @@ export const redactManifest = (manifest: string): { text: string; secrets: numbe
     } else current.push(line);
   }
   flush();
-  return { text: out.join('\n'), secrets };
+  return { text: out.join('\n'), secrets, masked };
 };

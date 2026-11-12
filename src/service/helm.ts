@@ -130,6 +130,8 @@ export interface PanelManifest {
   manifest: string;
   /** How many Secret documents were hidden. */
   secrets: number;
+  /** How many values that look like secrets were hidden in other objects (a password in a ConfigMap, an env var). */
+  masked: number;
   /** `Kind/name`, one per document. */
   resources: string[];
 }
@@ -138,8 +140,8 @@ export interface PanelManifest {
 export const panelManifest = async (target: Target, namespace: string, name: string, revision?: number): Promise<PanelManifest> => {
   checkNames(namespace, name);
   if (revision !== undefined && !validRevision(revision)) throw bad('That revision is not valid.');
-  const { text, secrets } = redactManifest(await rawManifest(target, namespace, name, revision));
-  return { manifest: text, secrets, resources: manifestDocs(text).map((doc) => doc.key) };
+  const { text, secrets, masked } = redactManifest(await rawManifest(target, namespace, name, revision));
+  return { manifest: text, secrets, masked, resources: manifestDocs(text).map((doc) => doc.key) };
 };
 
 // ----- The chart a release came from

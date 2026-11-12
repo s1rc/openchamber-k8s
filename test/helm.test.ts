@@ -269,6 +269,7 @@ describe('commands sent to helm', () => {
     expect(values.db).toEqual({ password: REDACTED, host: 'db.local' });
     const shown = await panelManifest(target, 'prod', 'app');
     expect(shown.secrets).toBe(1);
+    expect(shown.masked).toBe(0);
     expect(shown.manifest).not.toContain('c3VwZXItc2VjcmV0');
     expect(shown.resources).toEqual(['Deployment/web', 'Secret/creds']);
   });

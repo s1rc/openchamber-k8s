@@ -80,6 +80,7 @@ const ManifestTab = ({ release, context, dir }: { release: HelmRelease; context:
   const [manifest, reload] = useRead('/helm/manifest', { context, dir, namespace: release.namespace, name: release.name, revision: String(release.revision) }, (reply) => ({
     manifest: String(reply.manifest ?? ''),
     secrets: Number(reply.secrets ?? 0),
+    masked: Number(reply.masked ?? 0),
     resources: (reply.resources ?? []) as string[],
   }));
   if (manifest.phase === 'loading') return <div class="k8s-center"><Spinner label="Reading the manifest" /></div>;
@@ -94,6 +95,7 @@ const ManifestTab = ({ release, context, dir }: { release: HelmRelease; context:
         <Button label="Copy" size="xs" variant="ghost" onClick={() => { void host.writeClipboard(data.manifest); notify('success', 'Manifest copied.'); }} />
       </div>
       {data.secrets > 0 ? <div class="sui-muted sui-small k8s-wrap">{`${data.secrets} Secret ${data.secrets === 1 ? 'document is' : 'documents are'} hidden: the keys show, the values do not.`}</div> : null}
+      {data.masked > 0 ? <div class="sui-muted sui-small k8s-wrap">{`${data.masked} ${data.masked === 1 ? 'value' : 'values'} in other objects look like ${data.masked === 1 ? 'a secret' : 'secrets'} (a password or token in a ConfigMap or an environment variable) and read <redacted>. Copy copies the hidden text.`}</div> : null}
       <pre class="k8s-yaml sui-mono">{data.manifest}</pre>
     </div>
   );

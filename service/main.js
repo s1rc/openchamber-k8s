@@ -8298,6 +8298,52 @@ var forPanel = (isSecretKind, object, reveal = false) => {
 var REDACTED = "<redacted>";
 var SENSITIVE_KEY = /(password|secret|token|key|credential)/i;
 var isSensitiveKey = (key) => SENSITIVE_KEY.test(key);
+var LOOSE_WORDS = "password|passwd|passphrase|token|api[_-]?key|secret[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credentials?";
+var LOOSE = new RegExp(`((?:^|[\\s'"{,\\\\])[\\w.-]*?(?:${LOOSE_WORDS})[\\w.-]*)(["']?\\s*[:=]\\s*)('[^']*'|"[^"]*"|[^\\s'",}\\\\]+)`, "gi");
+var LOOSE_NOT_A_VALUE_KEY = /(name|ref|file|path|from|checksum|hash|enabled|ttl|expir\w*|type|url|namespace|selector|length|size|rotation|policy|version|mode|interval|period|id)$/i;
+var LOOSE_NOT_A_SECRET_VALUE = /^(true|false|null|none|nil|~|\[\]|\{\})$/i;
+var unquote = (value) => {
+  const quote = value[0];
+  if ((quote === "'" || quote === '"') && value.length >= 2 && value.endsWith(quote))
+    return { inner: value.slice(1, -1), open: quote, close: quote };
+  return { inner: value, open: "", close: "" };
+};
+var worthHiding = (value) => value.length >= 4 && !LOOSE_NOT_A_SECRET_VALUE.test(value) && !value.startsWith("<redacted") && !value.startsWith("{{") && !value.startsWith("$") && !/^[./~]/.test(value);
+var maskLooseSecrets = (text) => {
+  const values = [];
+  const masked = text.replace(LOOSE, (all, head, middle, raw) => {
+    const key = head.replace(/^[\s'"{,\\]/, "");
+    if (LOOSE_NOT_A_VALUE_KEY.test(key))
+      return all;
+    const { inner, open, close } = unquote(raw);
+    if (!worthHiding(inner))
+      return all;
+    values.push(inner);
+    return `${head}${middle}${open}${REDACTED}${close}`;
+  });
+  return { text: masked, values };
+};
+var secretLikeName = (name) => new RegExp(`(${LOOSE_WORDS})`, "i").test(name) && !LOOSE_NOT_A_VALUE_KEY.test(name);
+var maskDocumentLines = (lines) => {
+  let masked = 0;
+  const out = lines.map((line) => {
+    const result = maskLooseSecrets(line);
+    masked += result.values.length;
+    return result.text;
+  });
+  for (let i = 0;i + 1 < out.length; i += 1) {
+    const name = /^\s*-?\s*name:\s*["']?([\w.-]+)["']?\s*$/.exec(out[i]);
+    const value = name && secretLikeName(name[1]) ? /^(\s*)value:\s*(.+?)\s*$/.exec(out[i + 1]) : null;
+    if (!value)
+      continue;
+    const { inner, open, close } = unquote(value[2]);
+    if (!worthHiding(inner))
+      continue;
+    out[i + 1] = `${value[1]}value: ${open}${REDACTED}${close}`;
+    masked += 1;
+  }
+  return { lines: out, masked };
+};
 var redactValues = (value, hide = false) => {
   if (Array.isArray(value))
     return value.map((entry) => redactValues(entry, hide));
@@ -8311,6 +8357,8 @@ var redactValues = (value, hide = false) => {
   }
   if (hide && (typeof value === "string" && value !== "" || typeof value === "number" || typeof value === "bigint"))
     return REDACTED;
+  if (typeof value === "string")
+    return maskLooseSecrets(value).text;
   return value;
 };
 var pathText = (path) => path.map((part) => typeof part === "number" ? `[${part}]` : `.${part}`).join("").replace(/^\./, "") || "(root)";
@@ -8320,6 +8368,18 @@ var restoreRedacted = (edited, original) => {
     if (node === REDACTED) {
       if (before !== undefined && before !== null && typeof before !== "object")
         return before;
+      unresolved.push(pathText(path));
+      return node;
+    }
+    if (typeof node === "string" && node.includes(REDACTED) && typeof before === "string") {
+      const hidden = maskLooseSecrets(before).values;
+      const parts = node.split(REDACTED);
+      if (parts.length - 1 === hidden.length)
+        return parts.reduce((text, part, index) => text + part + (index < hidden.length ? hidden[index] : ""), "");
+      unresolved.push(pathText(path));
+      return node;
+    }
+    if (typeof node === "string" && node.includes(REDACTED)) {
       unresolved.push(pathText(path));
       return node;
     }
@@ -8370,12 +8430,19 @@ var redactDocument = (lines) => {
 var redactManifest = (manifest) => {
   const out = [];
   let secrets = 0;
+  let masked = 0;
   let current = [];
   const flush = () => {
     if (current.length === 0)
       return;
     const result = redactDocument(current);
-    out.push(...result.lines);
+    if (result.secrets > 0)
+      out.push(...result.lines);
+    else {
+      const loose = maskDocumentLines(result.lines);
+      out.push(...loose.lines);
+      masked += loose.masked;
+    }
     secrets += result.secrets;
     current = [];
   };
@@ -8390,7 +8457,7 @@ var redactManifest = (manifest) => {
   }
   flush();
   return { text: out.join(`
-`), secrets };
+`), secrets, masked };
 };
 
 // src/service/k8s.ts
@@ -9694,8 +9761,8 @@ var panelManifest = async (target, namespace, name, revision) => {
   checkNames(namespace, name);
   if (revision !== undefined && !validRevision(revision))
     throw bad("That revision is not valid.");
-  const { text, secrets } = redactManifest(await rawManifest(target, namespace, name, revision));
-  return { manifest: text, secrets, resources: manifestDocs(text).map((doc) => doc.key) };
+  const { text, secrets, masked } = redactManifest(await rawManifest(target, namespace, name, revision));
+  return { manifest: text, secrets, masked, resources: manifestDocs(text).map((doc) => doc.key) };
 };
 var RECORD_MAX_BYTES = 30000000;
 var decodeRecord = (encoded, layers) => {
