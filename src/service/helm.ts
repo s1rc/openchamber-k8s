@@ -48,9 +48,19 @@ export const setHelmRunner = (next: Runner | null): void => {
 const TIME_FORMAT = '2006-01-02T15:04:05Z07:00';
 const RELEASE_STATES = ['--deployed', '--failed', '--pending', '--superseded', '--uninstalled', '--uninstalling'];
 
+/**
+ * Helm 4 prints a log line (`level=WARN msg="upgrade failed" ... error="..."`) before its own `Error:` line. The `Error:` line
+ * says the same thing without the noise, so it is used when there is one.
+ */
+export const cleanHelmOutput = (stderr: string): string => {
+  const text = stderr.trim();
+  const errorLine = text.split('\n').reverse().find((line) => line.startsWith('Error:'));
+  return errorLine ? errorLine.replace(/^Error:\s*/, '') : text;
+};
+
 /** Reads helm's own words and says what kind of failure it is. */
 export const helmError = (stderr: string, exitedEmpty = false, context?: string): K8sError => {
-  const text = stderr.trim();
+  const text = cleanHelmOutput(stderr);
   if (!text && exitedEmpty) return new K8sError('K8S_ERROR', 'Helm took too long to answer or was stopped.');
   if (/release: not found|release ".*" not found|no revision for release/i.test(text)) return new K8sError('NOT_FOUND', 'That release or revision was not found.');
   if (/another operation \(install\/upgrade\/rollback\) is in progress/i.test(text)) return new K8sError('CONFLICT', 'Another Helm change is running on this release. Try again when it has finished.');

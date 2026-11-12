@@ -9630,8 +9630,14 @@ var defaultRunner = (args, options) => run(helmPath(), args, options);
 var runner = defaultRunner;
 var TIME_FORMAT = "2006-01-02T15:04:05Z07:00";
 var RELEASE_STATES = ["--deployed", "--failed", "--pending", "--superseded", "--uninstalled", "--uninstalling"];
-var helmError = (stderr, exitedEmpty = false, context) => {
+var cleanHelmOutput = (stderr) => {
   const text = stderr.trim();
+  const errorLine = text.split(`
+`).reverse().find((line) => line.startsWith("Error:"));
+  return errorLine ? errorLine.replace(/^Error:\s*/, "") : text;
+};
+var helmError = (stderr, exitedEmpty = false, context) => {
+  const text = cleanHelmOutput(stderr);
   if (!text && exitedEmpty)
     return new K8sError("K8S_ERROR", "Helm took too long to answer or was stopped.");
   if (/release: not found|release ".*" not found|no revision for release/i.test(text))

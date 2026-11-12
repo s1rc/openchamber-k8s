@@ -241,7 +241,7 @@ export const UpgradeDialog = (props: Common) => {
       {values.phase === 'error' ? <ErrorLine error={values.error.message ?? 'Could not read the values.'} /> : null}
       {confirming && ready ? (
         <div class="k8s-wrap">
-          {`The cluster accepted this change in a check. Upgrading writes revision ${check!.revision + 1} of ${release.name} and applies ${check!.diff.changed.length + check!.diff.added.length + check!.diff.removed.length} object changes.${check!.diff.removed.length > 0 ? ` ${check!.diff.removed.length} objects are removed.` : ''}`}
+          {`Helm rendered the chart with these values. Upgrading writes revision ${check!.revision + 1} of ${release.name} and changes ${check!.diff.changed.length + check!.diff.added.length + check!.diff.removed.length} objects.${check!.diff.removed.length > 0 ? ` ${check!.diff.removed.length} objects are removed.` : ''} Helm cannot test the change against the cluster first: if the cluster refuses an object, the release is left with a failed revision, and you can roll back to the last good one.`}
         </div>
       ) : null}
       {values.phase === 'ready' && !(confirming && ready) ? (
@@ -295,6 +295,7 @@ export const UpgradeDialog = (props: Common) => {
 /** Uninstall: lists what goes, then one click. */
 export const UninstallDialog = (props: Common) => {
   const { release, onClose, onDone } = props;
+  const gone = release.status === 'uninstalled';
   const [resources, setResources] = useState<string[] | null>(null);
   const [keepHistory, setKeepHistory] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -333,17 +334,19 @@ export const UninstallDialog = (props: Common) => {
       wide
       footer={
         <>
-          <Button label="Uninstall" size="sm" variant="destructive" loading={busy} disabled={resources === null || busy} onClick={() => void run()} />
+          <Button label="Uninstall" size="sm" variant="destructive" loading={busy} disabled={(resources === null && !gone) || busy} onClick={() => void run()} />
           <Button label="Cancel" size="sm" variant="ghost" onClick={onClose} disabled={busy} />
         </>
       }
     >
       <div class="k8s-wrap">
-        {`Helm removes every object this release created${keepHistory ? ' and keeps its history, so it can be rolled back or reinstalled' : ', and its history'}. This cannot be undone.`}
+        {gone
+          ? 'Helm already removed the objects of this release and kept its history. Uninstalling now deletes the history too. This cannot be undone.'
+          : `Helm removes every object this release created${keepHistory ? ' and keeps its history, so it can be rolled back or reinstalled' : ', and its history'}. This cannot be undone.`}
       </div>
-      <Switch label="Keep the release history" checked={keepHistory} onChange={setKeepHistory} disabled={busy} />
-      {resources === null ? <div class="k8s-center"><Spinner label="Listing the objects" /></div> : null}
-      {resources && resources.length > 0 ? (
+      {gone ? null : <Switch label="Keep the release history" checked={keepHistory} onChange={setKeepHistory} disabled={busy} />}
+      {resources === null && !gone ? <div class="k8s-center"><Spinner label="Listing the objects" /></div> : null}
+      {resources && resources.length > 0 && !gone ? (
         <>
           <div class="sui-small sui-muted">{`${resources.length} objects are removed:`}</div>
           <div class="k8s-drain-list">

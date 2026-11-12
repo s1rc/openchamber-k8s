@@ -17,7 +17,7 @@ import {
   validRevision,
 } from '../src/shared/helm.ts';
 import { cellText, rowText, sortRows, statusOf } from '../src/shared/kinds.ts';
-import { chartFiles, decodeRecord, helmError, listReleases, panelManifest, panelValues, rebuildProblem, rollbackRelease, setHelmRunner, uninstallRelease, upgradeRelease } from '../src/service/helm.ts';
+import { chartFiles, cleanHelmOutput, decodeRecord, helmError, listReleases, panelManifest, panelValues, rebuildProblem, rollbackRelease, setHelmRunner, uninstallRelease, upgradeRelease } from '../src/service/helm.ts';
 import { REDACTED } from '../src/shared/redact.ts';
 import { K8sError } from '../src/service/errors.ts';
 
@@ -209,6 +209,13 @@ describe('helmError', () => {
     expect(helmError('Error: Token has expired').code).toBe('AUTH_EXPIRED');
     expect(helmError('Error: something odd').code).toBe('K8S_ERROR');
     expect(helmError('', true).message).toContain('too long');
+  });
+
+  test('uses helm\'s Error line and drops its log line', () => {
+    const noisy = 'level=WARN msg="upgrade failed" name=x error="server-side apply failed: Service \\"x\\" is invalid"\nError: UPGRADE FAILED: server-side apply failed: Service "x" is invalid';
+    expect(cleanHelmOutput(noisy)).toBe('UPGRADE FAILED: server-side apply failed: Service "x" is invalid');
+    expect(cleanHelmOutput('plain text')).toBe('plain text');
+    expect(helmError(noisy).message).not.toContain('level=WARN');
   });
 });
 
