@@ -5,7 +5,7 @@ import { actionsFor, type ActionId } from '../../shared/actions.ts';
 import { podSpecOf } from '../../shared/kinds.ts';
 import { nodeShellCommand, SHELL_COPIED, shellCommand } from '../../shared/shell.ts';
 import type { Obj } from '../../shared/types.ts';
-import { call, host, notify } from '../host.ts';
+import { call, copyText, host, notify } from '../host.ts';
 import { Badge, Button, List, Menu, Select, Spinner, TextField } from '../kit.tsx';
 import { Modal } from '../Modal.tsx';
 import { portsOf } from '../useForwards.ts';
@@ -62,8 +62,7 @@ export const Actions = ({ object, context, dir, namespace, onOpenLogs, onOpenCon
   };
 
   const copy = async (text: string, done: string): Promise<void> => {
-    await host.writeClipboard(text);
-    notify('success', done);
+    await copyText(text, done);
   };
 
   const onSelect = (id: string): void => {

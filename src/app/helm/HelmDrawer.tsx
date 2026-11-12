@@ -6,7 +6,8 @@ import { ageText } from '../../shared/format.ts';
 import { helmStatus, type HelmHistoryEntry, type HelmRelease } from '../../shared/helm.ts';
 import { REDACTED } from '../../shared/redact.ts';
 import { ErrorState } from '../errors.tsx';
-import { host, notify } from '../host.ts';
+import { copyText } from '../host.ts';
+import { CopyButton } from '../CopyButton.tsx';
 import { Banner, Button, Menu, Spinner, Switch, Tabs } from '../kit.tsx';
 import { RollbackDialog, UninstallDialog, UpgradeDialog } from './HelmDialogs.tsx';
 import { useRead } from './useRead.ts';
@@ -65,7 +66,7 @@ const ValuesTab = ({ release, context, dir, onEdit }: { release: HelmRelease; co
         <Switch label="Computed values" description="With the chart's defaults" checked={all} onChange={setAll} />
         <span class="k8s-push" />
         <Button label="Refresh" size="xs" variant="outline" onClick={reload} />
-        <Button label="Copy" size="xs" variant="ghost" onClick={() => { void host.writeClipboard(text); notify('success', 'Values copied.'); }} />
+        <CopyButton text={text} done="Values copied" />
         <Button label="Edit and upgrade" size="xs" onClick={onEdit} />
       </div>
       <div class="sui-muted sui-small k8s-wrap">
@@ -92,7 +93,7 @@ const ManifestTab = ({ release, context, dir }: { release: HelmRelease; context:
         <span class="sui-muted sui-small">{`${data.resources.length} objects`}</span>
         <span class="k8s-push" />
         <Button label="Refresh" size="xs" variant="outline" onClick={reload} />
-        <Button label="Copy" size="xs" variant="ghost" onClick={() => { void host.writeClipboard(data.manifest); notify('success', 'Manifest copied.'); }} />
+        <CopyButton text={data.manifest} done="Manifest copied" />
       </div>
       {data.secrets > 0 ? <div class="sui-muted sui-small k8s-wrap">{`${data.secrets} Secret ${data.secrets === 1 ? 'document is' : 'documents are'} hidden: the keys show, the values do not.`}</div> : null}
       {data.masked > 0 ? <div class="sui-muted sui-small k8s-wrap">{`${data.masked} ${data.masked === 1 ? 'value' : 'values'} in other objects look like ${data.masked === 1 ? 'a secret' : 'secrets'} (a password or token in a ConfigMap or an environment variable) and read <redacted>. Copy copies the hidden text.`}</div> : null}
@@ -181,8 +182,7 @@ export const HelmDrawer = ({ release, gone, context, dir, now, rail, onClose, on
     else if (action === 'upgrade') setDialog({ kind: 'upgrade' });
     else if (action === 'uninstall') setDialog({ kind: 'uninstall' });
     else if (action === 'copy-name') {
-      void host.writeClipboard(release.name);
-      notify('success', 'Name copied.');
+      void copyText(release.name, 'Name copied.');
     }
   };
 

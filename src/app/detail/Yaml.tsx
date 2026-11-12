@@ -4,6 +4,7 @@ import { isSecret } from '../../shared/kinds.ts';
 import type { Obj } from '../../shared/types.ts';
 import { call, notify } from '../host.ts';
 import { Badge, Button, Spinner, TextField } from '../kit.tsx';
+import { CopyButton } from '../CopyButton.tsx';
 import { Modal } from '../Modal.tsx';
 import { diffCount, diffLines } from './diff.ts';
 
@@ -106,6 +107,7 @@ export const Yaml = ({ object, context, dir, namespace, editing, onEditing }: Pr
         <div class="sui-row">
           <span class="sui-muted sui-small">Read only.</span>
           <span class="k8s-push" />
+          <CopyButton text={base} done="YAML copied" />
           <Button label="Edit" size="xs" variant="outline" onClick={() => onEditing(true)} />
         </div>
         <pre class="k8s-yaml sui-mono">{base}</pre>
