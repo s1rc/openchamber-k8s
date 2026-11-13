@@ -99,6 +99,17 @@ export const ensureProxy = async (target: Target): Promise<string> => {
 /** Output the proxy printed so far, for classifying a failed request. Never logged. */
 export const proxyOutput = (target: Target): string => proxies.get(targetKey(target))?.output ?? '';
 
+/**
+ * After a sign-in, forget what the proxies of these contexts printed while the login was expired. That text is used to
+ * classify later failures, and an old "Token has expired" must not turn an unrelated 5xx into a sign-in prompt.
+ */
+export const resetProxyOutput = (contexts: readonly string[]): void => {
+  for (const proxy of proxies.values()) {
+    const context = proxy.key.slice(proxy.key.indexOf('|') + 1);
+    if (contexts.includes(context)) proxy.output = '';
+  }
+};
+
 export const touchProxy = (target: Target): void => {
   const proxy = proxies.get(targetKey(target));
   if (proxy) proxy.lastUsed = Date.now();

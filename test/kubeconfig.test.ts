@@ -44,6 +44,25 @@ describe('parseKubeconfig', () => {
     expect(by('env').awsProfile).toBe('from-env');
   });
 
+  test('contexts that share an OIDC login share a key, made of a hash and not of the values', () => {
+    const user = (issuer: string, client: string, extra: string[] = []) => ({ exec: { command: 'kubectl', args: ['oidc-login', 'get-token', `--oidc-issuer-url=${issuer}`, `--oidc-client-id=${client}`, ...extra] } });
+    const parsed = parseKubeconfig({
+      clusters: [{ name: 'c', cluster: {} }],
+      users: [
+        { name: 'u1', user: user('https://idp.example/a', 'client-one', ['--oidc-client-secret=SHHH']) },
+        { name: 'u2', user: user('https://idp.example/a', 'client-one') },
+        { name: 'u3', user: user('https://idp.example/b', 'client-one') },
+        { name: 'u4', user: { exec: { command: 'aws', args: ['eks'] } } },
+      ],
+      contexts: [1, 2, 3, 4].map((n) => ({ name: `c${n}`, context: { cluster: 'c', user: `u${n}` } })),
+    }).contexts;
+    expect(parsed[0]?.oidcKey).toBe(parsed[1]?.oidcKey);
+    expect(parsed[0]?.oidcKey).not.toBe(parsed[2]?.oidcKey);
+    expect(parsed[0]?.oidcKey).toMatch(/^[0-9a-f]{12}$/);
+    expect(parsed[3]?.oidcKey).toBeNull();
+    expect(JSON.stringify(parsed)).not.toMatch(/SHHH|idp\.example|client-one/);
+  });
+
   test('keeps nothing that looks like a credential', () => {
     expect(JSON.stringify(contexts)).not.toMatch(/nope|DATA\+OMITTED|oidc-client-id/);
   });

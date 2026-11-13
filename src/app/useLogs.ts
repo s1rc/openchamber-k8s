@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { Obj } from '../shared/types.ts';
 import { call } from './host.ts';
+import { useRetryOnSignIn } from './signin.ts';
 import { subscribeLogs } from './watches.ts';
 
 /** One pod whose container logs are followed. `containers` is the pod's container names. */
@@ -34,6 +35,10 @@ export interface LogsState {
   lines: LogLine[];
   state: 'idle' | 'connecting' | 'live' | 'ended' | 'error';
   error: string | null;
+  /** The stream stopped because the login for the cluster expired. */
+  authExpired: boolean;
+  /** Opens the streams again, for Try again and after a sign-in. */
+  reopen: () => void;
   clear: () => void;
 }
 
@@ -46,7 +51,9 @@ export const useLogs = (targets: LogTarget[] | null, options: LogOptions): LogsS
   const next = useRef(0);
   const phase = useRef<LogsState['state']>('idle');
   const errorRef = useRef<string | null>(null);
-  const key = targets ? `${options.context}|${options.namespace}|${options.container ?? ''}|${options.previous}|${options.timestamps}|${targets.map((target) => target.pod).join(',')}` : '';
+  const authRef = useRef(false);
+  const [nonce, setNonce] = useState(0);
+  const key = targets ? `${nonce}|${options.context}|${options.namespace}|${options.container ?? ''}|${options.previous}|${options.timestamps}|${targets.map((target) => target.pod).join(',')}` : '';
 
   const clear = (): void => {
     lines.current = [];
@@ -58,6 +65,7 @@ export const useLogs = (targets: LogTarget[] | null, options: LogOptions): LogsS
     lines.current = [];
     next.current = 0;
     errorRef.current = null;
+    authRef.current = false;
     phase.current = targets && targets.length > 0 ? 'connecting' : 'idle';
     setTick((value) => value + 1);
     if (!targets || targets.length === 0) return;
@@ -93,6 +101,7 @@ export const useLogs = (targets: LogTarget[] | null, options: LogOptions): LogsS
       if (cancelled) return;
       if (!reply.ok) {
         failed.add(target.pod);
+        if (reply.code === 'AUTH_EXPIRED') authRef.current = true;
         errorRef.current = String(reply.error ?? 'Could not open the logs.');
         settle();
         return;
@@ -112,6 +121,7 @@ export const useLogs = (targets: LogTarget[] | null, options: LogOptions): LogsS
           active.delete(streamId);
           if (state === 'error') {
             failed.add(target.pod);
+            if (code === 'AUTH_EXPIRED') authRef.current = true;
             errorRef.current = code ? `The log stream stopped (${code}).` : 'The log stream stopped.';
           }
           settle();
@@ -135,7 +145,9 @@ export const useLogs = (targets: LogTarget[] | null, options: LogOptions): LogsS
     };
   }, [key]);
 
-  return { lines: lines.current, state: phase.current, error: errorRef.current, clear };
+  const reopen = (): void => setNonce((value) => value + 1);
+  useRetryOnSignIn(options.context, authRef.current && phase.current === 'error', reopen);
+  return { lines: lines.current, state: phase.current, error: errorRef.current, authExpired: authRef.current && phase.current === 'error', reopen, clear };
 };
 
 /** The pods a workload runs, so its logs can be merged. One list call, no timer. */

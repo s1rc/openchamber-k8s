@@ -16,6 +16,7 @@ const ctx = (name: string, account: string, region: string, cluster: string, ser
   region,
   auth: 'aws',
   awsProfile: null,
+  oidcKey: null,
 });
 
 const CONTEXTS = [
@@ -41,11 +42,11 @@ const deps = (extra: Partial<ScopeDeps> = {}): ScopeDeps => ({
   loadContexts: async () => CONTEXTS,
   picks: {},
   awsProfiles: () => ({
-    initech: { accountId: '987654321098', region: 'us-east-1' },
-    apac: { accountId: '987654321098', region: 'ap-southeast-2' },
-    anywhere: { accountId: '987654321098', region: null },
-    nw: { accountId: '210987654321', region: 'us-east-1' },
-    noaccount: { accountId: null, region: 'us-east-1' },
+    initech: { accountId: '987654321098', region: 'us-east-1', auth: 'sso' },
+    apac: { accountId: '987654321098', region: 'ap-southeast-2', auth: 'sso' },
+    anywhere: { accountId: '987654321098', region: null, auth: 'sso' },
+    nw: { accountId: '210987654321', region: 'us-east-1', auth: 'sso' },
+    noaccount: { accountId: null, region: 'us-east-1', auth: 'keys' },
   }),
   ...extra,
 });
@@ -76,15 +77,39 @@ describe('readAwsProfiles', () => {
     const dir = project({
       config: `[default]\nregion = us-west-2\n\n[profile a]\nsso_account_id = 111111111111\nregion=eu-west-1\n\n[profile b]\nrole_arn = arn:aws:iam::222222222222:role/x\n\n[sso-session s]\nsso_region = us-east-1\n`,
     });
-    const profiles = readAwsProfiles(join(dir, 'config'));
-    expect(profiles.a).toEqual({ accountId: '111111111111', region: 'eu-west-1' });
+    const profiles = readAwsProfiles(join(dir, 'config'), null);
+    expect(profiles.a).toEqual({ accountId: '111111111111', region: 'eu-west-1', auth: 'sso' });
     expect(profiles.b?.accountId).toBe('222222222222');
     expect(profiles.default?.region).toBe('us-west-2');
     expect(profiles.s).toBeUndefined();
   });
 
   test('a missing file is empty', () => {
-    expect(readAwsProfiles(join(root, 'nope'))).toEqual({});
+    expect(readAwsProfiles(join(root, 'nope'), null)).toEqual({});
+  });
+
+  test('says how each profile gets credentials, and keeps only the names from the credentials file', () => {
+    const dir = project({
+      config: [
+        '[default]', 'region = us-east-1',
+        '[profile sso1]', 'sso_session = s', 'sso_account_id = 111111111111', 'region = us-east-1',
+        '[profile role1]', 'role_arn = arn:aws:iam::222222222222:role/x', 'source_profile = default',
+        '[profile proc]', 'credential_process = /bin/true',
+        '[profile bare]', 'region = eu-west-1',
+        '[profile both]', 'sso_session = s', 'sso_account_id = 333333333333',
+      ].join('\n'),
+      credentials: ['[default]', 'aws_access_key_id = AKIAFAKEFAKEFAKE1234', 'aws_secret_access_key = SECRETSECRETSECRET', '[keysonly]', 'aws_access_key_id = AKIAFAKEFAKEFAKE9999', '[both]', 'aws_access_key_id = AKIAFAKEFAKEFAKE0000'].join('\n'),
+    });
+    const profiles = readAwsProfiles(join(dir, 'config'), join(dir, 'credentials'));
+    expect(profiles.default?.auth).toBe('keys');
+    expect(profiles.sso1?.auth).toBe('sso');
+    expect(profiles.role1?.auth).toBe('role');
+    expect(profiles.proc?.auth).toBe('process');
+    expect(profiles.bare?.auth).toBe('none');
+    expect(profiles.keysonly?.auth).toBe('keys');
+    // SSO is tried before static keys, so a profile with both signs in with SSO.
+    expect(profiles.both?.auth).toBe('sso');
+    expect(JSON.stringify(profiles)).not.toMatch(/AKIA|SECRET/);
   });
 });
 

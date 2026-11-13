@@ -7171,6 +7171,7 @@ var clip = (text, max = 300) => {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max)}...` : flat;
 };
+var scrub = (text) => text.replace(/\b(AKIA|ASIA|AIDA|AROA)[0-9A-Z]{12,}\b/g, "<key id>").replace(/https?:\/\/\S+/g, "<link>").replace(/\beyJ[A-Za-z0-9_-]{8,}(\.[A-Za-z0-9_-]*){0,2}/g, "<token>").replace(/[A-Za-z0-9+/_=-]{40,}/g, "<redacted>");
 var classifyText = (text) => {
   if (MISSING_PROGRAM.test(text))
     return "NO_KUBECTL";
@@ -7283,6 +7284,12 @@ var kubectlPath = () => {
   const found = findBin("kubectl");
   if (!found)
     throw new K8sError("NO_KUBECTL", "kubectl was not found. Install it, for example with Homebrew.", { kind: "install" });
+  return found;
+};
+var awsPath = () => {
+  const found = findBin("aws");
+  if (!found)
+    throw new K8sError("NO_KUBECTL", "The aws program was not found. Install the AWS CLI, for example with Homebrew.", { kind: "install" });
   return found;
 };
 var kubeconfigArgs = (kubeconfig) => kubeconfig ? ["--kubeconfig", kubeconfig] : [];
@@ -7461,6 +7468,13 @@ var ensureProxy = async (target) => {
   return proxy.sock;
 };
 var proxyOutput = (target) => proxies.get(targetKey(target))?.output ?? "";
+var resetProxyOutput = (contexts) => {
+  for (const proxy of proxies.values()) {
+    const context = proxy.key.slice(proxy.key.indexOf("|") + 1);
+    if (contexts.includes(context))
+      proxy.output = "";
+  }
+};
 var touchProxy = (target) => {
   const proxy = proxies.get(targetKey(target));
   if (proxy)
@@ -9116,6 +9130,91 @@ var restoreForwards = async () => {
     start(forward);
 };
 
+// src/shared/shell.ts
+var SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+var shellQuote = (value) => SAFE.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
+
+// src/shared/eks.ts
+var PROFILE = /^[A-Za-z0-9][A-Za-z0-9_.@+=-]{0,127}$/;
+var REGION = /^[a-z]{2}(-[a-z]+)+-\d{1,2}$/;
+var CLUSTER = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/;
+var ALIAS = /^[A-Za-z0-9][A-Za-z0-9_.@-]{0,126}$/;
+var ACCOUNT = /^\d{12}$/;
+var isProfileName = (value) => typeof value === "string" && PROFILE.test(value);
+var isRegion = (value) => typeof value === "string" && REGION.test(value);
+var isClusterName = (value) => typeof value === "string" && CLUSTER.test(value);
+var isAlias = (value) => typeof value === "string" && ALIAS.test(value);
+var isAccountId = (value) => typeof value === "string" && ACCOUNT.test(value);
+var signInPlan = (info, profiles, envProfile) => {
+  if (info.auth === "oidc")
+    return { kind: "oidc" };
+  if (info.auth !== "aws")
+    return { kind: "none", profile: null, reason: "other" };
+  const name = info.awsProfile ?? (envProfile && envProfile.trim() ? envProfile.trim() : "default");
+  const profile = profiles[name];
+  if (!profile)
+    return { kind: "none", profile: name, reason: "missing" };
+  if (profile.auth === "sso" && isProfileName(name))
+    return { kind: "sso", profile: name };
+  return { kind: "none", profile: name, reason: profile.auth === "keys" ? "keys" : "other" };
+};
+var signInText = (plan) => {
+  if (!plan)
+    return "Your sign-in for this cluster has expired.";
+  if (plan.kind === "sso")
+    return `Your AWS sign-in for the profile "${plan.profile}" has expired. Sign in again to bring this cluster back.`;
+  if (plan.kind === "oidc")
+    return "Your login for this cluster has expired. Sign in again: your browser opens to finish it.";
+  if (plan.reason === "keys")
+    return `This cluster signs in with the access keys of the AWS profile "${plan.profile ?? "default"}". Those cannot be renewed here: update the keys, then try again.`;
+  if (plan.reason === "missing")
+    return `This cluster uses the AWS profile "${plan.profile ?? ""}", which is not in your AWS config. Add it, then try again.`;
+  return "Your sign-in for this cluster has expired, and it cannot be renewed from here. Sign in the way you usually do, then try again.";
+};
+var updateKubeconfigCommand = (input) => {
+  if (!isClusterName(input.name))
+    return { ok: false, error: "That cluster name is not one this panel can add." };
+  if (!isRegion(input.region))
+    return { ok: false, error: "That region is not valid." };
+  if (!isProfileName(input.profile))
+    return { ok: false, error: "That AWS profile name is not one this panel can use." };
+  if (!isAlias(input.alias))
+    return { ok: false, error: "Use letters, digits, dots, dashes and underscores for the name, starting with a letter or digit." };
+  const kubeconfig = input.kubeconfig;
+  if (kubeconfig !== undefined && (kubeconfig.length === 0 || kubeconfig.startsWith("-") || /[\0\n\r]/.test(kubeconfig)))
+    return { ok: false, error: "That kubeconfig path is not valid." };
+  const args = ["eks", "update-kubeconfig", "--name", input.name, "--region", input.region, "--profile", input.profile, "--alias", input.alias, ...kubeconfig ? ["--kubeconfig", kubeconfig] : []];
+  return { ok: true, args, text: ["aws", ...args.map(shellQuote)].join(" ") };
+};
+var suggestAlias = (name, region, accountId, taken) => {
+  const base = `${name}-${region}`;
+  if (!taken.has(base))
+    return base;
+  if (accountId) {
+    const withAccount = `${base}-${accountId}`;
+    if (!taken.has(withAccount))
+      return withAccount;
+  }
+  return base;
+};
+var contextFor = (cluster, contexts) => {
+  const found = contexts.find((info) => info.clusterName === cluster.name && info.region === cluster.region && (!cluster.accountId || !info.account || info.account === cluster.accountId));
+  return found?.name ?? null;
+};
+var signInUrl = (output) => {
+  for (const match of output.matchAll(/https:\/\/[^\s"'<>]+/g)) {
+    const text = match[0].replace(/[.,;)]+$/, "");
+    if (text.length > 2000)
+      continue;
+    try {
+      const host = new URL(text).hostname.toLowerCase();
+      if (/(^|\.)(amazonaws\.com|awsapps\.com|amazon\.com|aws)$/.test(host))
+        return text;
+    } catch {}
+  }
+  return null;
+};
+
 // src/shared/prom.ts
 var NOT_A_SERVER = /alertmanager|exporter|kube-state-metrics|pushgateway|operator|adapter|blackbox|grafana|thanos|promtail/i;
 var SERVER_LABELS = new Set(["prometheus", "kube-prometheus-stack-prometheus"]);
@@ -9379,6 +9478,405 @@ var parseAuditLine = (line) => {
   }
 };
 
+// src/service/auth.ts
+import { spawn as spawn3 } from "node:child_process";
+import { randomBytes } from "node:crypto";
+var SIGN_IN_MS = 5 * 60 * 1000;
+var KEEP_MS = 10 * 60 * 1000;
+var stopTree = (child) => {
+  if (!child.pid)
+    return;
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    try {
+      child.kill("SIGTERM");
+    } catch {}
+  }
+};
+var outcomeOf = (kind, code, output) => {
+  if (code === 0)
+    return { ok: true };
+  if (kind === "oidc" && /forbidden/i.test(output) && classifyText(output) !== "AUTH_EXPIRED")
+    return { ok: true };
+  const found = classifyText(output);
+  if (kind === "oidc" && found === "AUTH_EXPIRED")
+    return { ok: false, error: "The sign-in did not finish. Try again." };
+  if (found === "UNREACHABLE")
+    return { ok: false, error: "The cluster is not reachable. Check your network or VPN." };
+  if (found === "NO_KUBECTL")
+    return { ok: false, error: "A program the sign-in needs was not found. Install it and try again." };
+  const tail = output.trim().split(/\r?\n/).filter((line) => line.trim()).slice(-2).join(" ");
+  return { ok: false, error: clip(scrub(tail), 200) || "The sign-in did not finish. Try again." };
+};
+var createAuth = (deps) => {
+  const attempts = new Map;
+  const byId = new Map;
+  const prune = () => {
+    const now = deps.now();
+    for (const [key, attempt] of attempts) {
+      if (attempt.view.state !== "running" && now - attempt.view.expiresAt > KEEP_MS) {
+        attempts.delete(key);
+        byId.delete(attempt.view.id);
+      }
+    }
+  };
+  const finish = (attempt, state, error) => {
+    if (attempt.view.state !== "running")
+      return;
+    if (attempt.timer)
+      clearTimeout(attempt.timer);
+    attempt.timer = null;
+    attempt.view = { ...attempt.view, state, expiresAt: deps.now(), ...error ? { error } : {} };
+    delete attempt.view.joined;
+    deps.announce(attempt.view);
+    if (state === "done")
+      deps.onDone(attempt.view);
+  };
+  const start = (request) => {
+    prune();
+    const running = attempts.get(request.key);
+    if (running && running.view.state === "running")
+      return { ...running.view, joined: true };
+    const now = deps.now();
+    const view = {
+      id: `a_${randomBytes(6).toString("hex")}`,
+      key: request.key,
+      kind: request.kind,
+      profile: request.profile ?? null,
+      context: request.context ?? null,
+      contexts: request.contexts,
+      state: "running",
+      startedAt: now,
+      expiresAt: now + deps.timeoutMs
+    };
+    const attempt = { view, child: null, timer: null, stop: null, output: "", errors: "" };
+    if (running)
+      byId.delete(running.view.id);
+    attempts.set(request.key, attempt);
+    byId.set(view.id, attempt);
+    const child = spawn3(request.file, request.args, { env: childEnv(), stdio: ["ignore", "pipe", "pipe"], detached: true });
+    attempt.child = child;
+    const onData = (chunk) => {
+      attempt.output = (attempt.output + String(chunk)).slice(-6000);
+      if (request.kind === "sso" && !attempt.view.url) {
+        const url = signInUrl(attempt.output);
+        if (url) {
+          attempt.view = { ...attempt.view, url };
+          deps.announce(attempt.view);
+        }
+      }
+    };
+    child.stdout?.on("data", onData);
+    child.stderr?.on("data", (chunk) => {
+      attempt.errors = (attempt.errors + String(chunk)).slice(-4000);
+      onData(chunk);
+    });
+    child.on("error", () => finish(attempt, "failed", "A program the sign-in needs was not found. Install it and try again."));
+    child.on("exit", (code) => {
+      if (attempt.stop === "cancelled")
+        return finish(attempt, "cancelled");
+      if (attempt.stop === "timeout")
+        return finish(attempt, "timeout", `The sign-in was not finished in ${Math.round(deps.timeoutMs / 60000)} minutes.`);
+      const result = outcomeOf(request.kind, code ?? -1, attempt.errors.trim() ? attempt.errors : attempt.output);
+      if (result.ok)
+        finish(attempt, "done");
+      else
+        finish(attempt, "failed", result.error);
+    });
+    attempt.timer = setTimeout(() => {
+      attempt.stop = "timeout";
+      stopTree(child);
+      setTimeout(() => finish(attempt, "timeout", `The sign-in was not finished in ${Math.round(deps.timeoutMs / 60000)} minutes.`), 3000).unref();
+    }, deps.timeoutMs);
+    attempt.timer.unref();
+    deps.announce(attempt.view);
+    return attempt.view;
+  };
+  const cancel = (id) => {
+    const attempt = byId.get(id);
+    if (!attempt)
+      return null;
+    if (attempt.view.state === "running" && attempt.child) {
+      attempt.stop = "cancelled";
+      stopTree(attempt.child);
+      finish(attempt, "cancelled");
+    }
+    return attempt.view;
+  };
+  const list = () => {
+    prune();
+    return [...attempts.values()].map((attempt) => attempt.view);
+  };
+  const stopAll = () => {
+    for (const attempt of attempts.values()) {
+      if (attempt.view.state === "running" && attempt.child) {
+        attempt.stop = "cancelled";
+        stopTree(attempt.child);
+      }
+    }
+  };
+  return { start, cancel, list, stopAll };
+};
+
+// src/service/eks.ts
+import { readFileSync as readFileSync4, renameSync as renameSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join5 } from "node:path";
+var FRESH_MS = 60 * 60 * 1000;
+var FAILED_MS = 60 * 1000;
+var CACHE_FILE = "eks-discovery.json";
+var DEFAULT_CONCURRENCY = 3;
+var classifyAwsFailure = (output, auth) => {
+  if (/accessdenied|is not authorized to perform|unauthorizedoperation|not authorized/i.test(output)) {
+    return { status: "denied", message: "This profile is not allowed to list EKS clusters here.", profileWide: false };
+  }
+  if (/invalidclienttokenid|signaturedoesnotmatch|security token included in the request is invalid|authfailure|invalidaccesskeyid/i.test(output)) {
+    return { status: "error", message: "AWS does not accept the keys of this profile.", profileWide: true };
+  }
+  const code = classifyText(output);
+  if (code === "AUTH_EXPIRED") {
+    return auth === "sso" ? { status: "signin", message: "Your sign-in has expired.", profileWide: true } : { status: "expired", message: "The credentials of this profile are missing or have expired.", profileWide: true };
+  }
+  if (code === "NO_KUBECTL")
+    return { status: "error", message: "A program this profile needs was not found.", profileWide: true };
+  if (code === "UNREACHABLE" || /could not connect to the endpoint|connect timeout|read timeout|endpointconnectionerror|ssl validation failed/i.test(output)) {
+    return { status: "unreachable", message: "AWS did not answer. Check your network or VPN.", profileWide: true };
+  }
+  return { status: "error", message: clip(scrub(output), 200) || "AWS returned an error.", profileWide: false };
+};
+var planDiscovery = (profiles, kubeRegions) => {
+  const regions = new Set(kubeRegions.filter(isRegion));
+  const planned = [];
+  const skipped = [];
+  for (const name of Object.keys(profiles).sort()) {
+    const profile = profiles[name];
+    const own = profile.region && isRegion(profile.region) ? [profile.region] : [];
+    const list = [...new Set([...own, ...regions])].sort();
+    const base = { profile: name, auth: profile.auth, accountId: profile.accountId, regions: list, count: 0, signIn: false, at: 0 };
+    if (!isProfileName(name))
+      skipped.push({ ...base, status: "skipped", message: "The name of this profile is not one this panel can use." });
+    else if (profile.auth === "none")
+      skipped.push({ ...base, status: "skipped", message: "No credentials." });
+    else if (list.length === 0)
+      skipped.push({ ...base, status: "skipped", message: "No region to look in." });
+    else
+      planned.push({ name, profile, regions: list });
+  }
+  return { planned, skipped };
+};
+var awsArgs = (profile, rest) => [...rest, "--profile", profile, "--no-cli-pager", "--cli-read-timeout", "20", "--cli-connect-timeout", "10"];
+var parseClusters = (stdout) => {
+  try {
+    const parsed = JSON.parse(stdout);
+    return Array.isArray(parsed.clusters) ? parsed.clusters.filter(isClusterName) : [];
+  } catch {
+    return [];
+  }
+};
+var discoverProfile = async (item, deps) => {
+  const clusters = [];
+  let accountId = item.profile.accountId && isAccountId(item.profile.accountId) ? item.profile.accountId : null;
+  let failure = null;
+  let okRegions = 0;
+  let failedRegions = 0;
+  for (const region of item.regions) {
+    const out = await deps.aws(awsArgs(item.name, ["eks", "list-clusters", "--region", region, "--output", "json"]));
+    if (out.code === 0) {
+      okRegions += 1;
+      for (const name of parseClusters(out.stdout))
+        clusters.push({ name, region, profile: item.name, accountId });
+      continue;
+    }
+    const found = classifyAwsFailure(`${out.stderr} ${out.stdout}`, item.profile.auth);
+    failedRegions += 1;
+    failure ??= found;
+    if (found.profileWide)
+      break;
+  }
+  if (okRegions > 0 && !accountId) {
+    const who = await deps.aws(awsArgs(item.name, ["sts", "get-caller-identity", "--query", "Account", "--output", "text"]));
+    const text = who.stdout.trim();
+    if (who.code === 0 && isAccountId(text))
+      accountId = text;
+    for (const cluster of clusters)
+      cluster.accountId = accountId;
+  }
+  const at = deps.now();
+  const base = { profile: item.name, auth: item.profile.auth, accountId, regions: item.regions, count: clusters.length, at };
+  if (okRegions > 0) {
+    const partial = failedRegions > 0 && failure ? `${failedRegions} of ${item.regions.length} regions could not be read: ${failure.message}` : null;
+    return { view: { ...base, status: "ok", message: partial, signIn: false }, clusters };
+  }
+  const why = failure ?? { status: "error", message: "AWS returned an error.", profileWide: false };
+  return { view: { ...base, status: why.status, message: why.message, signIn: why.status === "signin" }, clusters: [] };
+};
+var keyOf = (planned, kubeRegions) => `${planned.map((item) => `${item.name}:${item.profile.auth}:${item.profile.region ?? ""}`).join(",")}|${[...new Set(kubeRegions)].sort().join(",")}`;
+var isFresh = (view, now) => now - view.at < (view.status === "ok" || view.status === "denied" ? FRESH_MS : FAILED_MS);
+var readStored = () => {
+  try {
+    const value = JSON.parse(readFileSync4(join5(dataDir(), CACHE_FILE), "utf8"));
+    return value && value.version === 1 && Array.isArray(value.profiles) && Array.isArray(value.clusters) ? value : null;
+  } catch {
+    return null;
+  }
+};
+var writeStored = (value) => {
+  const dir = ensureDir(dataDir());
+  const file = join5(dir, CACHE_FILE);
+  const temp = `${file}.${process.pid}.tmp`;
+  writeFileSync4(temp, `${JSON.stringify(value, null, 2)}
+`, { mode: 384 });
+  renameSync2(temp, file);
+};
+var dataDir = () => process.env.OPENCHAMBER_SERVICE_DATA_DIR || stateDir();
+var runPool = async (items, limit, work) => {
+  let next = 0;
+  const lane = async () => {
+    while (next < items.length) {
+      const item = items[next];
+      next += 1;
+      await work(item);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, lane));
+};
+var createDiscovery = (deps, announce = () => {
+  return;
+}) => {
+  let running = null;
+  let progress = null;
+  const start = (options = {}) => {
+    if (running)
+      return { started: false };
+    const kubeRegions = deps.kubeRegions();
+    const { planned, skipped } = planDiscovery(deps.profiles(), kubeRegions);
+    const key = keyOf(planned, kubeRegions);
+    const stored = readStored();
+    const now = deps.now();
+    const sameShape = stored?.key === key;
+    let todo;
+    if (options.only)
+      todo = planned.filter((item) => item.name === options.only);
+    else if (!sameShape || options.refresh)
+      todo = planned;
+    else
+      todo = planned.filter((item) => {
+        const kept = stored.profiles.find((view) => view.profile === item.name);
+        return !kept || !isFresh(kept, now);
+      });
+    if (todo.length === 0)
+      return { started: false };
+    progress = { done: 0, total: todo.length };
+    announce({ state: "running", done: 0, total: todo.length });
+    const keep = sameShape && stored ? stored : null;
+    const results = new Map;
+    running = (async () => {
+      try {
+        await runPool(todo, deps.concurrency ?? DEFAULT_CONCURRENCY, async (item) => {
+          try {
+            results.set(item.name, await discoverProfile(item, deps));
+          } catch (error) {
+            const at = deps.now();
+            results.set(item.name, {
+              view: { profile: item.name, auth: item.profile.auth, accountId: item.profile.accountId, regions: item.regions, count: 0, signIn: false, at, status: "error", message: clip(scrub(error instanceof Error ? error.message : String(error)), 200) || "Something went wrong." },
+              clusters: []
+            });
+          }
+          progress = { done: results.size, total: todo.length };
+          announce({ state: "running", done: results.size, total: todo.length });
+        });
+        const names = new Set(todo.map((item) => item.name));
+        const profiles = [
+          ...(keep?.profiles ?? []).filter((view) => !names.has(view.profile) && planned.some((item) => item.name === view.profile)),
+          ...[...results.values()].map((entry) => entry.view),
+          ...skipped
+        ].sort((a, b) => a.profile.localeCompare(b.profile));
+        const clusters = [...(keep?.clusters ?? []).filter((cluster) => !names.has(cluster.profile) && planned.some((item) => item.name === cluster.profile)), ...[...results.values()].flatMap((entry) => entry.clusters)];
+        writeStored({ version: 1, key, profiles, clusters });
+      } finally {
+        running = null;
+        progress = null;
+        announce({ state: "done", at: deps.now() });
+      }
+    })();
+    running.catch(() => {
+      return;
+    });
+    return { started: true };
+  };
+  const state = (contexts, kubeconfigArg, kubeconfigPath) => {
+    const kubeRegions = deps.kubeRegions();
+    const { planned, skipped } = planDiscovery(deps.profiles(), kubeRegions);
+    const stored = readStored();
+    const now = deps.now();
+    const sameShape = stored?.key === keyOf(planned, kubeRegions);
+    const profiles = stored ? stored.profiles.filter((view) => skipped.some((entry) => entry.profile === view.profile) || planned.some((item) => item.name === view.profile)) : [];
+    const known = new Set(profiles.map((view) => view.profile));
+    const all = [...profiles, ...skipped.filter((entry) => !known.has(entry.profile))].sort((a, b) => a.profile.localeCompare(b.profile));
+    const taken = new Set(contexts.map((info) => info.name));
+    const seen = new Set;
+    const clusters = [];
+    for (const cluster of (stored?.clusters ?? []).sort((a, b) => (a.accountId ?? "").localeCompare(b.accountId ?? "") || a.region.localeCompare(b.region) || a.name.localeCompare(b.name) || a.profile.localeCompare(b.profile))) {
+      const id = `${cluster.accountId ?? cluster.profile}|${cluster.region}|${cluster.name}`;
+      if (seen.has(id))
+        continue;
+      seen.add(id);
+      clusters.push({ ...cluster, context: contextFor(cluster, contexts), alias: suggestAlias(cluster.name, cluster.region, cluster.accountId, taken) });
+    }
+    const checked = planned.map((item) => stored?.profiles.find((view) => view.profile === item.name));
+    const everyFresh = sameShape && checked.every((view) => view !== undefined && isFresh(view, now));
+    const oldest = checked.filter((view) => view !== undefined && view.at > 0).reduce((min, view) => min === null || view.at < min ? view.at : min, null);
+    return {
+      running: running !== null,
+      progress,
+      at: oldest,
+      fresh: everyFresh && planned.length > 0,
+      profiles: all,
+      clusters,
+      taken: [...taken].sort(),
+      kubeconfigArg,
+      kubeconfigPath
+    };
+  };
+  return { start, state, isRunning: () => running !== null, idle: () => running ?? Promise.resolve() };
+};
+var kubeconfigTarget = (arg) => {
+  if (arg)
+    return arg;
+  const first = (process.env.KUBECONFIG ?? "").split(":").find(Boolean);
+  return first || join5(homedir3(), ".kube", "config");
+};
+var addToKubeconfig = async (deps, request, expect) => {
+  const command = updateKubeconfigCommand(request);
+  if (!command.ok)
+    throw new K8sError("BAD_REQUEST", command.error);
+  const profile = deps.profiles()[request.profile];
+  if (!profile)
+    throw new K8sError("INVALID", `The AWS profile "${request.profile}" is not in your AWS config.`);
+  if (profile.auth === "none")
+    throw new K8sError("INVALID", `The AWS profile "${request.profile}" has no credentials.`);
+  const contexts = await deps.contexts();
+  if (contexts.some((info) => info.name === request.alias))
+    throw new K8sError("CONFLICT", `You already have a cluster named "${request.alias}". Pick another name.`);
+  if (expect !== command.text)
+    throw new K8sError("CONFLICT", "The command is not the one you confirmed. Review it again.");
+  const out = await deps.aws(command.args);
+  if (out.code !== 0) {
+    const found = classifyAwsFailure(`${out.stderr} ${out.stdout}`, profile.auth);
+    if (found.status === "signin")
+      throw new K8sError("AUTH_EXPIRED", "Your sign-in for this AWS profile has expired.", { kind: "sign-in", profile: request.profile });
+    if (found.status === "expired")
+      throw new K8sError("AUTH_EXPIRED", found.message);
+    if (found.status === "denied")
+      throw new K8sError("FORBIDDEN", "This profile is not allowed to read that cluster.");
+    if (found.status === "unreachable")
+      throw new K8sError("UNREACHABLE", found.message);
+    throw new K8sError("K8S_ERROR", found.message);
+  }
+  return { command: command.text };
+};
+
 // src/shared/gitops.ts
 var { col: col3, NAME: NAME3, NAMESPACE: NAMESPACE2, AGE: AGE2, st: st2, kv: kv2, condition: condition2, text: text4, arr: arr3 } = viewHelpers;
 var shortRevision = (revision) => revision.replace(/\b(sha1|sha256|sha512):([0-9a-f]{8,})/g, (_all, algo, hash) => `${algo}:${hash.slice(0, 7)}`).replace(/^[0-9a-f]{40,64}$/, (hash) => hash.slice(0, 7));
@@ -9548,7 +10046,7 @@ var readCrds = async (target, refresh = false) => {
 // src/service/helm.ts
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join as join5 } from "node:path";
+import { dirname, join as join6 } from "node:path";
 import { gunzipSync } from "node:zlib";
 
 // src/shared/diff.ts
@@ -9835,7 +10333,7 @@ var chartFiles = (chart) => {
 var writeChart = async (dir, files) => {
   await mkdir(dir, { recursive: true, mode: 448 });
   for (const file of files) {
-    const target = join5(dir, file.path);
+    const target = join6(dir, file.path);
     await mkdir(dirname(target), { recursive: true, mode: 448 });
     await writeFile(target, file.data, { mode: 384 });
   }
@@ -9935,10 +10433,10 @@ var upgradeRelease = async (target, namespace, name, request) => {
     throw new K8sError("INVALID", `A hidden value could not be put back (${restored.unresolved.slice(0, 3).join(", ")}). Type the value again instead of <redacted>.`);
   }
   const resolved = await resolveChart(target, namespace, name, request);
-  const dir = await mkdtemp(join5(tmpdir(), "k8s-helm-"));
+  const dir = await mkdtemp(join6(tmpdir(), "k8s-helm-"));
   try {
     await chmod(dir, 448);
-    const valuesFile = join5(dir, "values.yaml");
+    const valuesFile = join6(dir, "values.yaml");
     await writeFile(valuesFile, $stringify(restored.value ?? {}, { lineWidth: 0 }), { mode: 384 });
     let chartArg;
     let version = null;
@@ -9947,7 +10445,7 @@ var upgradeRelease = async (target, namespace, name, request) => {
       const problem = rebuildProblem(record);
       if (problem)
         throw new K8sError("INVALID", problem);
-      chartArg = join5(dir, "chart");
+      chartArg = join6(dir, "chart");
       await writeChart(chartArg, chartFiles(record.chart));
     } else {
       chartArg = resolved.ref;
@@ -9988,6 +10486,7 @@ var uninstallRelease = async (target, namespace, name, options) => {
 };
 
 // src/service/kubeconfig.ts
+import { createHash as createHash4 } from "node:crypto";
 var ARN = /^arn:aws[a-z-]*:eks:([a-z0-9-]+):(\d{12}):cluster\/(.+)$/;
 var authKind = (exec) => {
   if (!exec)
@@ -9999,6 +10498,13 @@ var authKind = (exec) => {
   if (first === "oidc-login" || /kubelogin/.test(command))
     return "oidc";
   return "other";
+};
+var oidcKeyOf = (exec) => {
+  if (!exec || authKind(exec) !== "oidc")
+    return null;
+  const args = Array.isArray(exec.args) ? exec.args.map(String) : [];
+  const flag = (name) => args.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3) ?? "";
+  return createHash4("sha1").update(`${flag("oidc-issuer-url")}|${flag("oidc-client-id")}`).digest("hex").slice(0, 12);
 };
 var profileOf = (exec) => {
   if (!exec)
@@ -10039,7 +10545,8 @@ var parseKubeconfig = (doc) => {
       account: arn?.[2] ?? null,
       region: arn?.[1] ?? null,
       auth: authKind(exec),
-      awsProfile: profileOf(exec)
+      awsProfile: profileOf(exec),
+      oidcKey: oidcKeyOf(exec)
     });
   }
   const current = typeof doc["current-context"] === "string" && doc["current-context"] ? doc["current-context"] : null;
@@ -10065,6 +10572,7 @@ var loadKubeconfig = async (kubeconfig) => {
   cache2.set(key, { at: Date.now(), value });
   return value;
 };
+var clearKubeconfigCache = () => cache2.clear();
 var contextInfo = async (name, kubeconfig) => {
   const found = (await loadKubeconfig(kubeconfig)).contexts.find((info) => info.name === name);
   if (!found)
@@ -10073,9 +10581,9 @@ var contextInfo = async (name, kubeconfig) => {
 };
 
 // src/service/scope.ts
-import { existsSync, readdirSync as readdirSync3, readFileSync as readFileSync4, realpathSync, statSync } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { basename, isAbsolute, join as join6, relative, resolve } from "node:path";
+import { existsSync, readdirSync as readdirSync3, readFileSync as readFileSync5, realpathSync, statSync } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { basename, isAbsolute, join as join7, relative, resolve } from "node:path";
 var ENV_FILES = [".envrc", ".env", ".env.local", ".env.development"];
 var SKIP_DIRS = new Set(["node_modules", ".git", "vendor", "dist"]);
 var MAX_DEPTH = 4;
@@ -10104,14 +10612,32 @@ var parseEnvFile = (text) => {
   }
   return out;
 };
-var readAwsProfiles = (configPath = join6(homedir3(), ".aws", "config")) => {
+var awsConfigPath = () => process.env.AWS_CONFIG_FILE || join7(homedir4(), ".aws", "config");
+var awsCredentialsPath = () => process.env.AWS_SHARED_CREDENTIALS_FILE || join7(homedir4(), ".aws", "credentials");
+var credentialProfileNames = (path) => {
+  const names = new Set;
   let text = "";
   try {
-    text = readFileSync4(configPath, "utf8");
+    text = readFileSync5(path, "utf8");
   } catch {
-    return {};
+    return names;
+  }
+  for (const raw of text.split(/\r?\n/)) {
+    const section = /^\s*\[(.+)\]\s*$/.exec(raw);
+    if (section)
+      names.add(section[1].trim().replace(/^profile\s+/, ""));
+  }
+  return names;
+};
+var readAwsProfiles = (configPath = awsConfigPath(), credentialsPath = awsCredentialsPath()) => {
+  let text = "";
+  try {
+    text = readFileSync5(configPath, "utf8");
+  } catch {
+    text = "";
   }
   const profiles = {};
+  const seen = new Map;
   let current = null;
   for (const raw of text.split(/\r?\n/)) {
     const section = /^\s*\[(.+)\]\s*$/.exec(raw);
@@ -10123,8 +10649,10 @@ var readAwsProfiles = (configPath = join6(homedir3(), ".aws", "config")) => {
         current = header.slice(8).trim();
       else
         current = null;
-      if (current)
-        profiles[current] = { accountId: null, region: null };
+      if (current) {
+        profiles[current] = { accountId: null, region: null, auth: "none" };
+        seen.set(current, { sso: false, keys: false, role: false, process: false });
+      }
       continue;
     }
     if (!current)
@@ -10133,13 +10661,34 @@ var readAwsProfiles = (configPath = join6(homedir3(), ".aws", "config")) => {
     if (!pair)
       continue;
     const entry = profiles[current];
-    if (pair[1] === "sso_account_id")
+    const flags = seen.get(current);
+    const key = pair[1];
+    if (key === "sso_account_id")
       entry.accountId = pair[2];
-    if (pair[1] === "region")
+    if (key === "region")
       entry.region = pair[2];
-    if (pair[1] === "role_arn" && !entry.accountId)
+    if (key === "role_arn" && !entry.accountId)
       entry.accountId = /^arn:aws[a-z-]*:iam::(\d{12}):/.exec(pair[2])?.[1] ?? null;
+    if (key === "sso_session" || key === "sso_start_url" || key === "sso_account_id")
+      flags.sso = true;
+    if (key === "aws_access_key_id")
+      flags.keys = true;
+    if (key === "role_arn")
+      flags.role = true;
+    if (key === "credential_process")
+      flags.process = true;
   }
+  if (credentialsPath) {
+    for (const name of credentialProfileNames(credentialsPath)) {
+      if (!profiles[name]) {
+        profiles[name] = { accountId: null, region: null, auth: "none" };
+        seen.set(name, { sso: false, keys: false, role: false, process: false });
+      }
+      seen.get(name).keys = true;
+    }
+  }
+  for (const [name, flags] of seen)
+    profiles[name].auth = flags.role ? "role" : flags.sso ? "sso" : flags.keys ? "keys" : flags.process ? "process" : "none";
   return profiles;
 };
 var emptyTier = (label) => ({ context: null, namespace: null, candidates: [], reasons: [], confidence: 0, label });
@@ -10175,14 +10724,14 @@ var pathIsInside = (child, parent) => {
   const rel = relative(parent, child);
   return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
 };
-var expandHome = (value, home) => value === "~" ? home : value.startsWith("~/") ? join6(home, value.slice(2)) : value;
+var expandHome = (value, home) => value === "~" ? home : value.startsWith("~/") ? join7(home, value.slice(2)) : value;
 var envTier = async (dir, deps) => {
   const tier = emptyTier("From env file");
   const env = {};
   for (const file of ENV_FILES) {
     let text;
     try {
-      text = readFileSync4(join6(dir, file), "utf8");
+      text = readFileSync5(join7(dir, file), "utf8");
     } catch {
       continue;
     }
@@ -10196,7 +10745,7 @@ var envTier = async (dir, deps) => {
         return { ...env[key], key };
     return null;
   };
-  const home = deps.home ?? homedir3();
+  const home = deps.home ?? homedir4();
   const kube = pick("KUBECONFIG");
   if (kube) {
     const path = resolve(dir, expandHome(kube.value, home));
@@ -10276,9 +10825,9 @@ var listFiles = (root) => {
         break;
       if (entry.isDirectory()) {
         if (!SKIP_DIRS.has(entry.name) && depth < MAX_DEPTH)
-          queue.push({ dir: join6(dir, entry.name), depth: depth + 1 });
+          queue.push({ dir: join7(dir, entry.name), depth: depth + 1 });
       } else if (entry.isFile())
-        out.push(join6(dir, entry.name));
+        out.push(join7(dir, entry.name));
     }
   }
   return out;
@@ -10287,7 +10836,7 @@ var readSmall = (file) => {
   try {
     if (statSync(file).size > MAX_FILE_BYTES)
       return null;
-    return readFileSync4(file, "utf8");
+    return readFileSync5(file, "utf8");
   } catch {
     return null;
   }
@@ -10478,7 +11027,7 @@ var createScopeCache = (resolveFn, ttlMs = 5 * 60 * 1000, now = Date.now) => {
 };
 
 // src/service/logs.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 var BATCH_MS2 = 250;
 var LEASE_MS2 = 60000;
 var SWEEP_MS2 = 15000;
@@ -10555,7 +11104,7 @@ var ensureSweeper2 = () => {
 };
 var startLogs = async (request) => {
   const key = `${request.target.kubeconfig ?? ""}|${request.target.context}|${request.namespace}|${request.pod}|${request.container ?? ""}|${request.previous ? "previous" : ""}`;
-  const id = `l_${createHash4("sha1").update(`${key}|${++counter}`).digest("hex").slice(0, 12)}`;
+  const id = `l_${createHash5("sha1").update(`${key}|${++counter}`).digest("hex").slice(0, 12)}`;
   const stream = {
     id,
     key,
@@ -10706,11 +11255,11 @@ var readMetrics = async (target, want) => {
 };
 
 // src/service/prometheus.ts
-import { spawn as spawn3 } from "node:child_process";
-import { createHash as createHash5 } from "node:crypto";
+import { spawn as spawn4 } from "node:child_process";
+import { createHash as createHash6 } from "node:crypto";
 import http2 from "node:http";
-import { rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
-import { join as join7 } from "node:path";
+import { rmSync as rmSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { join as join8 } from "node:path";
 var PROBE_MS = 6000;
 var QUERY_MS = 20000;
 var FOUND_MS = 10 * 60000;
@@ -10787,15 +11336,15 @@ var ensureForward = async (target, service) => {
   }
   const remote = await portNumber(target, service);
   const local = await freePort();
-  const id = createHash5("sha1").update(key).digest("hex").slice(0, 10);
-  const child = spawn3(kubectlPath(), ["--context", target.context, ...kubeconfigArgs(target.kubeconfig), "-n", service.namespace, "port-forward", `svc/${service.name}`, `${local}:${remote}`, "--address", "127.0.0.1"], {
+  const id = createHash6("sha1").update(key).digest("hex").slice(0, 10);
+  const child = spawn4(kubectlPath(), ["--context", target.context, ...kubeconfigArgs(target.kubeconfig), "-n", service.namespace, "port-forward", `svc/${service.name}`, `${local}:${remote}`, "--address", "127.0.0.1"], {
     env: childEnv(),
     stdio: ["ignore", "pipe", "pipe"]
   });
-  const pidFile = join7(sockDir(), `fwd-prom-${id}.pid`);
+  const pidFile = join8(sockDir(), `fwd-prom-${id}.pid`);
   if (child.pid) {
     try {
-      writeFileSync4(pidFile, String(child.pid), { mode: 384 });
+      writeFileSync5(pidFile, String(child.pid), { mode: 384 });
     } catch {}
   }
   const entry = { key, child, ready: Promise.resolve(local), lastUsed: Date.now(), exited: false, pidFile };
@@ -10996,6 +11545,29 @@ var scopes = createScopeCache((dir) => resolveScope(dir, {
   awsProfiles: () => readAwsProfiles()
 }));
 var scopeFor = (dir) => scopes.get(dir);
+var kubeRegions = [];
+var discovery2 = createDiscovery({
+  aws: (args) => run(awsPath(), args, { timeoutMs: 30000, maxBuffer: 4000000 }),
+  profiles: () => readAwsProfiles(),
+  kubeRegions: () => kubeRegions,
+  now: Date.now
+}, (event) => publish("eks", event));
+var signIns = createAuth({
+  now: Date.now,
+  timeoutMs: SIGN_IN_MS,
+  announce: (view) => publish("auth", view),
+  onDone: (view) => resetProxyOutput(view.contexts)
+});
+var kubeconfigOf = async (params) => {
+  const dir = text6(params, "dir");
+  return dir ? (await scopeFor(dir))?.kubeconfig : undefined;
+};
+var eksState = async (params) => {
+  const kubeconfig = await kubeconfigOf(params);
+  const config = await loadKubeconfig(kubeconfig);
+  kubeRegions = config.contexts.map((info) => info.region).filter((region) => region !== null);
+  return { config, kubeconfig, state: () => discovery2.state(config.contexts, kubeconfig ?? null, kubeconfigTarget(kubeconfig ?? null)) };
+};
 var targetFor = async (params) => {
   const context = need(params, "context");
   const dir = text6(params, "dir");
@@ -11072,6 +11644,7 @@ var routes = {
     const config = await loadKubeconfig(scope?.kubeconfig);
     const locks = readLocks();
     const now = Date.now();
+    const profiles = readAwsProfiles();
     return {
       ok: true,
       current: config.current,
@@ -11086,7 +11659,8 @@ var routes = {
           auth: info.auth,
           protected: isProtected(locks, info.name, info.arn),
           locked: isLocked(locks, info.name, info.arn, now),
-          unlockedUntil: until
+          unlockedUntil: until,
+          signIn: signInPlan(info, profiles, process.env.AWS_PROFILE)
         };
       }),
       scope
@@ -11670,6 +12244,81 @@ var routes = {
       audit(params, target, verb, what);
     return { ok: true, ...result };
   },
+  "GET /eks": async (params) => ({ ok: true, ...(await eksState(params)).state() }),
+  "POST /eks/discover": async (params) => {
+    const only = text6(params, "profile");
+    if (only && !isProfileName(only))
+      throw new K8sError("BAD_REQUEST", "That AWS profile name is not one this panel can use.");
+    if (only && !readAwsProfiles()[only])
+      throw new K8sError("NOT_FOUND", `The AWS profile "${only}" is not in your AWS config.`);
+    const view = await eksState(params);
+    awsPath();
+    discovery2.start({ refresh: flag(params, "refresh"), ...only ? { only } : {} });
+    return { ok: true, ...view.state() };
+  },
+  "POST /eks/add": async (params) => {
+    const kubeconfig = await kubeconfigOf(params);
+    awsPath();
+    const request = { name: text6(params, "name"), region: text6(params, "region"), profile: text6(params, "profile"), alias: text6(params, "alias"), ...kubeconfig ? { kubeconfig } : {} };
+    const done = await addToKubeconfig({
+      aws: (args) => run(awsPath(), args, { timeoutMs: 40000, maxBuffer: 1e6 }),
+      contexts: async () => {
+        clearKubeconfigCache();
+        return (await loadKubeconfig(kubeconfig)).contexts;
+      },
+      profiles: () => readAwsProfiles()
+    }, request, text6(params, "expect"));
+    clearKubeconfigCache();
+    scopes.invalidate();
+    appendAudit({ project: text6(params, "dir") ?? null, context: request.alias, verb: "add to kubeconfig", target: `EKS ${request.name} in ${request.region} (profile ${request.profile})`, source: "panel" });
+    return { ok: true, context: request.alias, command: done.command };
+  },
+  "POST /auth/login": async (params) => {
+    const kubeconfig = await kubeconfigOf(params);
+    const config = await loadKubeconfig(kubeconfig);
+    const profiles = readAwsProfiles();
+    const plans = config.contexts.map((info) => ({ info, plan: signInPlan(info, profiles, process.env.AWS_PROFILE) }));
+    const context = text6(params, "context");
+    const profileParam = text6(params, "profile");
+    let request;
+    const sso = (profile, forContext) => ({
+      kind: "sso",
+      key: `sso:${profile}`,
+      profile,
+      ...forContext ? { context: forContext } : {},
+      contexts: plans.filter((entry) => entry.plan.kind === "sso" && entry.plan.profile === profile).map((entry) => entry.info.name),
+      file: awsPath(),
+      args: ["sso", "login", "--profile", profile]
+    });
+    if (context) {
+      const info = await contextInfo(context, kubeconfig);
+      const plan = signInPlan(info, profiles, process.env.AWS_PROFILE);
+      if (plan.kind === "none")
+        throw new K8sError("INVALID", signInText(plan));
+      if (plan.kind === "sso")
+        request = sso(plan.profile, context);
+      else {
+        request = {
+          kind: "oidc",
+          key: `oidc:${info.oidcKey ?? info.name}`,
+          context,
+          contexts: config.contexts.filter((other) => other.oidcKey === info.oidcKey).map((other) => other.name),
+          file: kubectlPath(),
+          args: [`--context=${context}`, ...kubeconfigArgs(kubeconfig), "get", "ns", "--request-timeout=30s"]
+        };
+      }
+    } else if (profileParam) {
+      if (!isProfileName(profileParam))
+        throw new K8sError("BAD_REQUEST", "That AWS profile name is not one this panel can use.");
+      if (profiles[profileParam]?.auth !== "sso")
+        throw new K8sError("INVALID", `The AWS profile "${profileParam}" does not sign in with SSO.`);
+      request = sso(profileParam);
+    } else
+      throw new K8sError("BAD_REQUEST", "Say which cluster or AWS profile to sign in to.");
+    return { ok: true, auth: signIns.start(request) };
+  },
+  "POST /auth/cancel": async (params) => ({ ok: true, auth: signIns.cancel(need(params, "id")) }),
+  "GET /auth/status": async () => ({ ok: true, attempts: signIns.list() }),
   "GET /audit": async (params) => {
     const limit = Math.min(500, Math.max(1, Number(params.limit) || 100));
     const project = text6(params, "dir");
@@ -11679,6 +12328,7 @@ var routes = {
   }
 };
 var shutdownRoutes = () => {
+  signIns.stopAll();
   closeAllWatches();
   closeAllLogs();
   closePrometheusForwards();

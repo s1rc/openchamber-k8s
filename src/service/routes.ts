@@ -1,4 +1,5 @@
 import { isLocked, isProtected, lock, setProtected, unlock, unlockedUntil } from '../shared/locks.ts';
+import { isProfileName, signInPlan, signInText } from '../shared/eks.ts';
 import { forPanel } from '../shared/redact.ts';
 import { parsePromService, type ChartScope } from '../shared/prom.ts';
 import { isSecret, kindPath, RESTARTABLE, SCALABLE, type KindInfo } from '../shared/kinds.ts';
@@ -18,16 +19,19 @@ import {
 import type { ForwardKind, Obj, ScopeResult, Target } from '../shared/types.ts';
 import { parseAllDocuments } from 'yaml';
 import { K8sError } from './errors.ts';
+import { createAuth, SIGN_IN_MS, type SignInRequest } from './auth.ts';
+import { addToKubeconfig, createDiscovery, kubeconfigTarget } from './eks.ts';
 import { callJson, resolveKind } from './k8s.ts';
 import { readCrds } from './crds.ts';
 import { chartSources, listReleases, panelManifest, panelValues, releaseHistory, rollbackRelease, uninstallRelease, upgradeRelease } from './helm.ts';
-import { contextInfo, loadKubeconfig } from './kubeconfig.ts';
+import { clearKubeconfigCache, contextInfo, loadKubeconfig } from './kubeconfig.ts';
 import { createScopeCache, readAwsProfiles, resolveScope } from './scope.ts';
 import { appendAudit, readAudit, readLocks, readPicks, writeLocks, writePick } from './state.ts';
-import { kubeconfigArgs, kubectlPath, run } from './exec.ts';
+import { awsPath, kubeconfigArgs, kubectlPath, run } from './exec.ts';
 import { createForward, listForwards, stopForward } from './forwards.ts';
 import { closeAllLogs, renewLogLeases, startLogs, stopLogs } from './logs.ts';
 import { readMetrics } from './metrics.ts';
+import { resetProxyOutput } from './proxy.ts';
 import { closePrometheusForwards, describeDetection, detect, forgetDetection, readCharts, writeOverride } from './prometheus.ts';
 import { closeAllWatches, openWatch, publish, renewLeases } from './watch.ts';
 
@@ -62,6 +66,40 @@ const scopes = createScopeCache((dir) =>
 );
 
 export const scopeFor = (dir: string): Promise<ScopeResult | null> => scopes.get(dir);
+
+// Regions of the kubeconfig the last request read: discovery looks in each of them for every profile.
+let kubeRegions: string[] = [];
+
+const discovery = createDiscovery(
+  {
+    aws: (args) => run(awsPath(), args, { timeoutMs: 30_000, maxBuffer: 4_000_000 }),
+    profiles: () => readAwsProfiles(),
+    kubeRegions: () => kubeRegions,
+    now: Date.now,
+  },
+  (event) => publish('eks', event),
+);
+
+const signIns = createAuth({
+  now: Date.now,
+  timeoutMs: SIGN_IN_MS,
+  announce: (view) => publish('auth', view),
+  // What the proxies printed while the login was expired must not colour later errors.
+  onDone: (view) => resetProxyOutput(view.contexts),
+});
+
+/** The kubeconfig the panel is showing for a project (a file its env file named, outside the repo), or the default. */
+const kubeconfigOf = async (params: Params): Promise<string | undefined> => {
+  const dir = text(params, 'dir');
+  return dir ? (await scopeFor(dir))?.kubeconfig : undefined;
+};
+
+const eksState = async (params: Params) => {
+  const kubeconfig = await kubeconfigOf(params);
+  const config = await loadKubeconfig(kubeconfig);
+  kubeRegions = config.contexts.map((info) => info.region).filter((region): region is string => region !== null);
+  return { config, kubeconfig, state: () => discovery.state(config.contexts, kubeconfig ?? null, kubeconfigTarget(kubeconfig ?? null)) };
+};
 
 /** The kubeconfig a project's env file named, only when it passed the safety check in the scope resolver. */
 const targetFor = async (params: Params): Promise<Target> => {
@@ -143,6 +181,7 @@ export const routes: Record<string, RouteHandler> = {
     const config = await loadKubeconfig(scope?.kubeconfig);
     const locks = readLocks();
     const now = Date.now();
+    const profiles = readAwsProfiles();
     return {
       ok: true,
       current: config.current,
@@ -158,6 +197,7 @@ export const routes: Record<string, RouteHandler> = {
           protected: isProtected(locks, info.name, info.arn),
           locked: isLocked(locks, info.name, info.arn, now),
           unlockedUntil: until,
+          signIn: signInPlan(info, profiles, process.env.AWS_PROFILE),
         };
       }),
       scope,
@@ -759,6 +799,97 @@ export const routes: Record<string, RouteHandler> = {
     return { ok: true, ...result };
   },
 
+  /** What EKS discovery has found so far, joined with the kubeconfig as it is now. Reads only; it never starts a look. */
+  'GET /eks': async (params) => ({ ok: true, ...(await eksState(params)).state() }),
+
+  /**
+   * Looks for EKS clusters in every AWS profile that has credentials: `aws eks list-clusters` for the profile's region and
+   * each region of the kubeconfig. A fresh answer (one hour) is used as it is, and only profiles without one are asked.
+   * It answers at once with `running: true`; the finished look is announced with an `eks` event.
+   */
+  'POST /eks/discover': async (params) => {
+    const only = text(params, 'profile');
+    if (only && !isProfileName(only)) throw new K8sError('BAD_REQUEST', 'That AWS profile name is not one this panel can use.');
+    if (only && !readAwsProfiles()[only]) throw new K8sError('NOT_FOUND', `The AWS profile "${only}" is not in your AWS config.`);
+    const view = await eksState(params);
+    awsPath();
+    discovery.start({ refresh: flag(params, 'refresh'), ...(only ? { only } : {}) });
+    return { ok: true, ...view.state() };
+  },
+
+  /** Adds a discovered cluster to the kubeconfig with `aws eks update-kubeconfig`. `expect` is the command the user confirmed. */
+  'POST /eks/add': async (params) => {
+    const kubeconfig = await kubeconfigOf(params);
+    awsPath();
+    const request = { name: text(params, 'name'), region: text(params, 'region'), profile: text(params, 'profile'), alias: text(params, 'alias'), ...(kubeconfig ? { kubeconfig } : {}) };
+    const done = await addToKubeconfig(
+      {
+        aws: (args) => run(awsPath(), args, { timeoutMs: 40_000, maxBuffer: 1_000_000 }),
+        contexts: async () => {
+          clearKubeconfigCache();
+          return (await loadKubeconfig(kubeconfig)).contexts;
+        },
+        profiles: () => readAwsProfiles(),
+      },
+      request,
+      text(params, 'expect'),
+    );
+    clearKubeconfigCache();
+    scopes.invalidate();
+    appendAudit({ project: text(params, 'dir') ?? null, context: request.alias as string, verb: 'add to kubeconfig', target: `EKS ${request.name} in ${request.region} (profile ${request.profile})`, source: 'panel' });
+    return { ok: true, context: request.alias, command: done.command };
+  },
+
+  /**
+   * Starts a sign-in for a cluster (`context`) or an AWS profile (`profile`): `aws sso login` for SSO, or `kubectl get ns`
+   * for OIDC so kubelogin opens the browser. It answers at once; the end comes as an `auth` event. A second request for
+   * a sign-in that is already running joins it and starts nothing.
+   */
+  'POST /auth/login': async (params) => {
+    const kubeconfig = await kubeconfigOf(params);
+    const config = await loadKubeconfig(kubeconfig);
+    const profiles = readAwsProfiles();
+    const plans = config.contexts.map((info) => ({ info, plan: signInPlan(info, profiles, process.env.AWS_PROFILE) }));
+    const context = text(params, 'context');
+    const profileParam = text(params, 'profile');
+    let request: SignInRequest;
+    const sso = (profile: string, forContext?: string): SignInRequest => ({
+      kind: 'sso',
+      key: `sso:${profile}`,
+      profile,
+      ...(forContext ? { context: forContext } : {}),
+      contexts: plans.filter((entry) => entry.plan.kind === 'sso' && entry.plan.profile === profile).map((entry) => entry.info.name),
+      file: awsPath(),
+      args: ['sso', 'login', '--profile', profile],
+    });
+    if (context) {
+      const info = await contextInfo(context, kubeconfig);
+      const plan = signInPlan(info, profiles, process.env.AWS_PROFILE);
+      if (plan.kind === 'none') throw new K8sError('INVALID', signInText(plan));
+      if (plan.kind === 'sso') request = sso(plan.profile, context);
+      else {
+        request = {
+          kind: 'oidc',
+          key: `oidc:${info.oidcKey ?? info.name}`,
+          context,
+          contexts: config.contexts.filter((other) => other.oidcKey === info.oidcKey).map((other) => other.name),
+          file: kubectlPath(),
+          args: [`--context=${context}`, ...kubeconfigArgs(kubeconfig), 'get', 'ns', '--request-timeout=30s'],
+        };
+      }
+    } else if (profileParam) {
+      if (!isProfileName(profileParam)) throw new K8sError('BAD_REQUEST', 'That AWS profile name is not one this panel can use.');
+      if (profiles[profileParam]?.auth !== 'sso') throw new K8sError('INVALID', `The AWS profile "${profileParam}" does not sign in with SSO.`);
+      request = sso(profileParam);
+    } else throw new K8sError('BAD_REQUEST', 'Say which cluster or AWS profile to sign in to.');
+    return { ok: true, auth: signIns.start(request) };
+  },
+
+  'POST /auth/cancel': async (params) => ({ ok: true, auth: signIns.cancel(need(params, 'id')) }),
+
+  /** The sign-ins running or finished lately. A panel that opens while one runs reads this once; events do not replay. */
+  'GET /auth/status': async () => ({ ok: true, attempts: signIns.list() }),
+
   'GET /audit': async (params) => {
     const limit = Math.min(500, Math.max(1, Number(params.limit) || 100));
     const project = text(params, 'dir');
@@ -774,6 +905,7 @@ export const routes: Record<string, RouteHandler> = {
 };
 
 export const shutdownRoutes = (): void => {
+  signIns.stopAll();
   closeAllWatches();
   closeAllLogs();
   closePrometheusForwards();

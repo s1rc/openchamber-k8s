@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { emptyUsage, usageFromReply, type UsageSet } from '../shared/metrics.ts';
 import { call } from './host.ts';
+import { useRetryOnSignIn } from './signin.ts';
 import { onLeaseTick } from './watches.ts';
 
 export interface UsageSpec {
@@ -31,6 +32,7 @@ const STALE_MS = 20_000;
 export const useUsage = (spec: UsageSpec): UsageView => {
   const [usage, setUsage] = useState<UsageSet>(() => emptyUsage('loading'));
   const [refreshing, setRefreshing] = useState(false);
+  const [authFailed, setAuthFailed] = useState(false);
   const readRef = useRef<() => void>(() => undefined);
   const key = `${spec.enabled}|${spec.context}|${spec.namespace}|${spec.nodes}|${spec.pods}|${spec.disk ?? false}|${spec.dir ?? ''}`;
 
@@ -58,6 +60,7 @@ export const useUsage = (spec: UsageSpec): UsageView => {
       if (cancelled || mine !== latest) return;
       readAt = Date.now();
       setRefreshing(false);
+      setAuthFailed(!reply.ok && reply.code === 'AUTH_EXPIRED');
       if (reply.ok) setUsage(usageFromReply(reply as Record<string, unknown>));
       else setUsage({ ...emptyUsage('unavailable'), message: String(reply.error ?? 'Usage could not be read.') });
     };
@@ -72,5 +75,6 @@ export const useUsage = (spec: UsageSpec): UsageView => {
     };
   }, [key]);
 
+  useRetryOnSignIn(spec.context, authFailed && spec.enabled, () => readRef.current());
   return { usage, refreshing, refresh: () => readRef.current() };
 };

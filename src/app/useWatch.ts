@@ -3,6 +3,7 @@ import type { KindInfo } from '../shared/kinds.ts';
 import type { Obj } from '../shared/types.ts';
 import type { ErrorInfo } from './errors.tsx';
 import { call } from './host.ts';
+import { useRetryOnSignIn } from './signin.ts';
 import { applyEvents, objectKey } from './apply-events.ts';
 import { subscribe, type WatchMessage } from './watches.ts';
 
@@ -16,6 +17,11 @@ export interface WatchSpec {
   dir: string | null;
   /** Only objects the cluster says match, e.g. `type=Warning` for events. */
   fieldSelector?: string;
+  /**
+   * Open the watch again by itself when a sign-in for this cluster finishes. For a watch whose failure nobody sees
+   * (the namespace list in the header); a watch drawn with an error banner retries through the banner.
+   */
+  retryOnSignIn?: boolean;
 }
 
 export interface WatchView {
@@ -136,6 +142,7 @@ export const useWatch = (spec: WatchSpec | null): WatchView => {
   }, [key]);
 
   const h = holder.current;
+  useRetryOnSignIn(spec?.context ?? null, Boolean(spec?.retryOnSignIn) && h.phase === 'error' && h.error?.code === 'AUTH_EXPIRED', () => reloadRef.current());
   const items = useMemo(() => [...h.map.values()], [h.map]);
   return { phase: h.phase, error: h.error, live: h.live, items, map: h.map, info: h.info, reload: () => reloadRef.current() };
 };

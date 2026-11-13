@@ -1,6 +1,7 @@
 import { useMemo } from 'preact/hooks';
 import { Chip, Dot } from '@openchamber-ext/shared-ui/preact';
 import type { ScopeResult } from '../shared/types.ts';
+import type { SignInPlan } from '../shared/eks.ts';
 import { Badge, Button, Select } from './kit.tsx';
 import { useWatch, type Live } from './useWatch.ts';
 
@@ -13,6 +14,8 @@ export interface ContextRow {
   protected: boolean;
   locked: boolean;
   unlockedUntil: number | null;
+  /** What Sign in does for this cluster. */
+  signIn?: SignInPlan | null;
 }
 
 interface Props {
@@ -28,6 +31,7 @@ interface Props {
   onUnlock: (name: string) => void;
   onLockNow: (name: string) => void;
   onActivity: () => void;
+  onDiscover: () => void;
 }
 
 const LIVE_LOOK: Record<Live, { tone: 'success' | 'warning' | 'error' | 'muted'; label: string }> = {
@@ -37,21 +41,26 @@ const LIVE_LOOK: Record<Live, { tone: 'success' | 'warning' | 'error' | 'muted';
   offline: { tone: 'error', label: 'Offline' },
 };
 
+/** The first entry of the cluster list: opens the EKS discovery instead of picking a cluster. */
+export const DISCOVER_ID = '__discover_eks__';
+
 const clock = (ms: number): string => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-export const Header = ({ contexts, context, namespace, dir, scope, live, layout, onPickContext, onPickNamespace, onUnlock, onLockNow, onActivity }: Props) => {
-  const namespaces = useWatch(context ? { context, namespace: '_all', kind: 'Namespace', dir } : null);
+export const Header = ({ contexts, context, namespace, dir, scope, live, layout, onPickContext, onPickNamespace, onUnlock, onLockNow, onActivity, onDiscover }: Props) => {
+  const namespaces = useWatch(context ? { context, namespace: '_all', kind: 'Namespace', dir, retryOnSignIn: true } : null);
   const current = contexts.find((row) => row.name === context) ?? null;
 
   const contextOptions = useMemo(
-    () =>
-      [...contexts]
+    () => [
+      { id: DISCOVER_ID, label: 'Discover EKS clusters' },
+      ...[...contexts]
         .sort((a, b) => (a.account ?? '').localeCompare(b.account ?? '') || a.name.localeCompare(b.name))
         .map((row) => ({
           id: row.name,
           label: row.name,
           hint: [row.account, row.region, row.protected ? 'protected' : null].filter(Boolean).join(' \u00b7 '),
         })),
+    ],
     [contexts],
   );
 
@@ -71,7 +80,7 @@ export const Header = ({ contexts, context, namespace, dir, scope, live, layout,
           <Select
             value={context}
             options={contextOptions}
-            onChange={onPickContext}
+            onChange={(id) => (id === DISCOVER_ID ? onDiscover() : onPickContext(id))}
             placeholder="Choose a cluster"
             searchable
             searchPlaceholder="Search clusters"

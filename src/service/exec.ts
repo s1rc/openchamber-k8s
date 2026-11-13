@@ -23,4 +23,10 @@ export const kubectlPath = (): string => {
   return found;
 };
 
+export const awsPath = (): string => {
+  const found = findBin('aws');
+  if (!found) throw new K8sError('NO_KUBECTL', 'The aws program was not found. Install the AWS CLI, for example with Homebrew.', { kind: 'install' });
+  return found;
+};
+
 export const kubeconfigArgs = (kubeconfig?: string): string[] => (kubeconfig ? ['--kubeconfig', kubeconfig] : []);

@@ -8,8 +8,8 @@ import { useEffect, useRef } from 'preact/hooks';
 import { proxyFunctions, signatureOf } from './stable.ts';
 
 /**
- * Like shared-ui's `useKit`, but the control is repainted only when its data changed. The shared hook updates after every
- * render, and a kit list repaints all its rows on an update, so a busy watch made the row under the mouse blink.
+ * The control is repainted only when its data changed. A kit list repaints all its rows on an update, so a busy watch made
+ * the row under the mouse blink. shared-ui's `useKit` did the same only before 0.2.0; this copy is kept (and tested).
  */
 const useStableKit = <P,>(mount: Mount<P>, props: P) => {
   const ref = useRef<HTMLSpanElement>(null);

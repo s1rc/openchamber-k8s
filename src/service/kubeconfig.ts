@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { ContextInfo, Obj } from '../shared/types.ts';
 import { fromOutput, K8sError } from './errors.ts';
 import { kubeconfigArgs, kubectlPath, run } from './exec.ts';
@@ -11,6 +12,14 @@ const authKind = (exec: Obj | undefined): ContextInfo['auth'] => {
   if (command === 'aws' || command === 'aws-iam-authenticator') return 'aws';
   if (first === 'oidc-login' || /kubelogin/.test(command)) return 'oidc';
   return 'other';
+};
+
+/** A short hash of the OIDC issuer and client id, so two contexts that share a login can be told apart from others. */
+const oidcKeyOf = (exec: Obj | undefined): string | null => {
+  if (!exec || authKind(exec) !== 'oidc') return null;
+  const args: string[] = Array.isArray(exec.args) ? exec.args.map(String) : [];
+  const flag = (name: string): string => args.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3) ?? '';
+  return createHash('sha1').update(`${flag('oidc-issuer-url')}|${flag('oidc-client-id')}`).digest('hex').slice(0, 12);
 };
 
 const profileOf = (exec: Obj | undefined): string | null => {
@@ -53,6 +62,7 @@ export const parseKubeconfig = (doc: Obj): { current: string | null; contexts: C
       region: arn?.[1] ?? null,
       auth: authKind(exec),
       awsProfile: profileOf(exec),
+      oidcKey: oidcKeyOf(exec),
     });
   }
   const current = typeof doc['current-context'] === 'string' && doc['current-context'] ? (doc['current-context'] as string) : null;

@@ -1,5 +1,6 @@
 import type { BannerTone } from '@openchamber/sdk/ui';
 import { Banner, Empty } from './kit.tsx';
+import { SignInPrompt } from './SignIn.tsx';
 
 export interface ErrorInfo {
   code: string;
@@ -22,13 +23,8 @@ const withMessage = (fallback: string) => (error: ErrorInfo): string => error.me
 
 const LOOKS: Record<string, Look> = {
   NO_KUBECTL: { tone: 'error', title: 'kubectl was not found', body: (e) => `${sentence(e.message || 'This panel needs kubectl')} Install kubectl, then try again.`, retry: true },
-  AUTH_EXPIRED: {
-    tone: 'warning',
-    title: 'Sign in to this cluster again',
-    body: (_e, context) =>
-      `Your login has expired. In OpenChamber's terminal run "aws sso login" (for OIDC clusters: "kubectl --context ${context ?? '<cluster>'} get ns"), then try again.`,
-    retry: true,
-  },
+  // Drawn by SignInPrompt (a Sign in button, a waiting state, Try again). The text here is the fallback for a context the panel has no plan for.
+  AUTH_EXPIRED: { tone: 'warning', title: 'Sign in to this cluster again', body: () => 'Your sign-in for this cluster has expired.', retry: true },
   FORBIDDEN: { tone: 'info', title: 'No access here', body: withMessage('Your account is not allowed to see this. The rest of the panel still works.'), inline: true },
   UNREACHABLE: { tone: 'error', title: 'Cluster not reachable', body: (e) => `${sentence(e.message || 'The cluster did not answer')} Check your network or VPN, then try again.`, retry: true },
   LOCKED: { tone: 'warning', title: 'This cluster is locked', body: withMessage('Production clusters are read-only until you unlock them.') },
@@ -56,6 +52,7 @@ interface Props {
 
 /** Draws one error: a banner with a Try again button, or a quiet note in the view for errors that only affect that view. */
 export const ErrorState = ({ error, context, onRetry }: Props) => {
+  if (error.code === 'AUTH_EXPIRED') return <SignInPrompt context={context} onRetry={onRetry} />;
   const look = lookFor(error.code);
   const body = look.body(error, context);
   const action = look.retry && onRetry ? { label: 'Try again', onClick: onRetry } : undefined;

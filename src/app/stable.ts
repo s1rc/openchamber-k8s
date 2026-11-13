@@ -1,4 +1,4 @@
-// The SDK kit repaints a control from scratch on every `update`, and the shared `useKit` calls `update` after every render.
+// The SDK kit repaints a control from scratch on every `update`. Before shared-ui 0.2.0 its `useKit` called `update` after every render.
 // A list that is rebuilt under a resting mouse loses its hover for a moment, which reads as a blink. These two helpers let
 // `kit.tsx` update a control only when its data changed, and keep every callback pointing at the latest render.
 

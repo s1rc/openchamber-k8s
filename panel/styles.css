@@ -285,3 +285,18 @@ body { font-family: var(--oc-font, system-ui, sans-serif); font-size: 13px; }
 .k8s-chart-source { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .k8s-chart-custom { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 8px; }
 .k8s-editor--short textarea { min-height: 220px; }
+
+/* Sign in and EKS discovery */
+.k8s-signin-wait { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.k8s-signin-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.k8s-signin-profile { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.k8s-eks { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.k8s-eks-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.k8s-eks-list { display: flex; flex-direction: column; gap: 6px; }
+.k8s-eks-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 10px; border: 1px solid var(--oc-border); border-radius: var(--oc-radius, 8px); background: var(--oc-elevated); min-width: 0; }
+.k8s-eks-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 12em; }
+.k8s-eks-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; margin-left: auto; min-width: 0; max-width: 100%; }
+.k8s-eks-actions .sui-chip { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.k8s-eks-name { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; }
+.k8s-eks-command { margin: 0; }
+.k8s-eks-profile { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--oc-border); border-radius: var(--oc-radius, 8px); min-width: 0; }

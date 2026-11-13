@@ -50,6 +50,8 @@ const earlyLogs = new Map<string, { at: number; messages: LogMessage[] }>();
 const lockListeners = new Set<(message: LockMessage) => void>();
 const forwardListeners = new Set<(forwards: ForwardView[]) => void>();
 const leaseListeners = new Set<() => void>();
+// Other topics the service pushes (`auth`, `eks`): one set of listeners each.
+const topicListeners = new Map<string, Set<(data: unknown) => void>>();
 let listening = false;
 let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -93,11 +95,23 @@ const listen = (): void => {
     else if (topic === 'logs') dispatchLog(data as unknown as LogMessage);
     else if (topic === 'lock') for (const listener of [...lockListeners]) listener(data as unknown as LockMessage);
     else if (topic === 'forwards') for (const listener of [...forwardListeners]) listener((data as unknown as { forwards: ForwardView[] }).forwards ?? []);
+    else for (const listener of [...(topicListeners.get(topic) ?? [])]) listener(data);
   });
   document.addEventListener('visibilitychange', () => {
     sync();
     if (document.visibilityState === 'visible') void renew();
   });
+};
+
+/** Hears one more topic of the service's events (`auth` for sign-ins, `eks` for the cluster discovery). Returns the function that stops it. */
+export const onTopic = (topic: string, listener: (data: unknown) => void): (() => void) => {
+  listen();
+  let set = topicListeners.get(topic);
+  if (!set) topicListeners.set(topic, (set = new Set()));
+  set.add(listener);
+  return () => {
+    set.delete(listener);
+  };
 };
 
 export const onLock = (listener: (message: LockMessage) => void): (() => void) => {

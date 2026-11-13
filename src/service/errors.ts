@@ -16,6 +16,8 @@ export type ErrorCode =
 export interface ErrorAction {
   kind: 'sign-in' | 'unlock' | 'install';
   context?: string;
+  /** For a sign-in that is about an AWS profile and not a cluster (the EKS discovery). */
+  profile?: string;
 }
 
 export class K8sError extends Error {
@@ -40,6 +42,17 @@ export const clip = (text: string, max = 300): string => {
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > max ? `${flat.slice(0, max)}...` : flat;
 };
+
+/**
+ * Text from a program that is shown in the panel: no access key id, no link (a sign-in link is single use), no token
+ * (a JWT, or any long unbroken run of letters and digits).
+ */
+export const scrub = (text: string): string =>
+  text
+    .replace(/\b(AKIA|ASIA|AIDA|AROA)[0-9A-Z]{12,}\b/g, '<key id>')
+    .replace(/https?:\/\/\S+/g, '<link>')
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}(\.[A-Za-z0-9_-]*){0,2}/g, '<token>')
+    .replace(/[A-Za-z0-9+/_=-]{40,}/g, '<redacted>');
 
 /** Reads kubectl, aws or proxy output and says what kind of failure it is, or null when unclear. */
 export const classifyText = (text: string): ErrorCode | null => {

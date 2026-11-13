@@ -4,6 +4,7 @@ import { Dot } from '@openchamber-ext/shared-ui/preact';
 import { stripAnsi } from '../../shared/format.ts';
 import { podSpecOf } from '../../shared/kinds.ts';
 import type { Obj } from '../../shared/types.ts';
+import { ErrorState } from '../errors.tsx';
 import { host } from '../host.ts';
 import { Button, Select, SearchField, Spinner, Switch } from '../kit.tsx';
 import { LOG_CAP, podsFor, useLogs, type LogTarget } from '../useLogs.ts';
@@ -131,7 +132,7 @@ export const LogView = ({ context, dir, namespace, object, onClose }: Props) => 
         <Button label="Clear" size="xs" variant="ghost" onClick={logs.clear} disabled={logs.lines.length === 0} />
       </div>
       {more ? <div class="sui-muted sui-small k8s-logs-note">{more}</div> : null}
-      {logs.error ? <div class="k8s-logs-note sui-small">{logs.error}</div> : null}
+      {logs.authExpired ? <ErrorState error={{ code: 'AUTH_EXPIRED' }} context={context} onRetry={logs.reopen} /> : logs.error ? <div class="k8s-logs-note sui-small">{logs.error}</div> : null}
       <div class={`k8s-log${wrap ? ' k8s-log--wrap' : ''}`} ref={logRef} onScroll={(event) => {
         const node = event.currentTarget as HTMLDivElement;
         follow.current = node.scrollTop + node.clientHeight >= node.scrollHeight - 24;

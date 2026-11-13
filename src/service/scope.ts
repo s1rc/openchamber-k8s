@@ -2,12 +2,10 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { parseAllDocuments } from 'yaml';
+import type { AwsProfile } from '../shared/eks.ts';
 import type { ContextInfo, Obj, ProjectPick, ScopeResult } from '../shared/types.ts';
 
-export interface AwsProfile {
-  accountId: string | null;
-  region: string | null;
-}
+export type { AwsProfile };
 
 export interface ScopeDeps {
   /** Contexts of a kubeconfig; no argument means the default one. */
@@ -45,15 +43,39 @@ export const parseEnvFile = (text: string): Record<string, string> => {
   return out;
 };
 
-/** The profiles of `~/.aws/config` with their account and region. */
-export const readAwsProfiles = (configPath = join(homedir(), '.aws', 'config')): Record<string, AwsProfile> => {
+const awsConfigPath = (): string => process.env.AWS_CONFIG_FILE || join(homedir(), '.aws', 'config');
+const awsCredentialsPath = (): string => process.env.AWS_SHARED_CREDENTIALS_FILE || join(homedir(), '.aws', 'credentials');
+
+/** Only the section names of the credentials file. The keys and secrets in it are never kept: a line that is not a header is skipped unread. */
+const credentialProfileNames = (path: string): Set<string> => {
+  const names = new Set<string>();
+  let text = '';
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return names;
+  }
+  for (const raw of text.split(/\r?\n/)) {
+    const section = /^\s*\[(.+)\]\s*$/.exec(raw);
+    if (section) names.add(section[1]!.trim().replace(/^profile\s+/, ''));
+  }
+  return names;
+};
+
+/**
+ * The profiles of `~/.aws/config` with their account, region and how they get credentials. The names in the credentials
+ * file count as profiles that hold keys. Nothing from the credentials file except those names is read.
+ * Pass `null` as the second argument to leave the credentials file out.
+ */
+export const readAwsProfiles = (configPath = awsConfigPath(), credentialsPath: string | null = awsCredentialsPath()): Record<string, AwsProfile> => {
   let text = '';
   try {
     text = readFileSync(configPath, 'utf8');
   } catch {
-    return {};
+    text = '';
   }
   const profiles: Record<string, AwsProfile> = {};
+  const seen = new Map<string, { sso: boolean; keys: boolean; role: boolean; process: boolean }>();
   let current: string | null = null;
   for (const raw of text.split(/\r?\n/)) {
     const section = /^\s*\[(.+)\]\s*$/.exec(raw);
@@ -62,17 +84,37 @@ export const readAwsProfiles = (configPath = join(homedir(), '.aws', 'config')):
       if (header === 'default') current = 'default';
       else if (header.startsWith('profile ')) current = header.slice(8).trim();
       else current = null;
-      if (current) profiles[current] = { accountId: null, region: null };
+      if (current) {
+        profiles[current] = { accountId: null, region: null, auth: 'none' };
+        seen.set(current, { sso: false, keys: false, role: false, process: false });
+      }
       continue;
     }
     if (!current) continue;
     const pair = /^\s*([A-Za-z_]+)\s*=\s*(.+?)\s*$/.exec(raw);
     if (!pair) continue;
     const entry = profiles[current]!;
-    if (pair[1] === 'sso_account_id') entry.accountId = pair[2]!;
-    if (pair[1] === 'region') entry.region = pair[2]!;
-    if (pair[1] === 'role_arn' && !entry.accountId) entry.accountId = /^arn:aws[a-z-]*:iam::(\d{12}):/.exec(pair[2]!)?.[1] ?? null;
+    const flags = seen.get(current)!;
+    const key = pair[1]!;
+    if (key === 'sso_account_id') entry.accountId = pair[2]!;
+    if (key === 'region') entry.region = pair[2]!;
+    if (key === 'role_arn' && !entry.accountId) entry.accountId = /^arn:aws[a-z-]*:iam::(\d{12}):/.exec(pair[2]!)?.[1] ?? null;
+    if (key === 'sso_session' || key === 'sso_start_url' || key === 'sso_account_id') flags.sso = true;
+    if (key === 'aws_access_key_id') flags.keys = true;
+    if (key === 'role_arn') flags.role = true;
+    if (key === 'credential_process') flags.process = true;
   }
+  if (credentialsPath) {
+    for (const name of credentialProfileNames(credentialsPath)) {
+      if (!profiles[name]) {
+        profiles[name] = { accountId: null, region: null, auth: 'none' };
+        seen.set(name, { sso: false, keys: false, role: false, process: false });
+      }
+      seen.get(name)!.keys = true;
+    }
+  }
+  // The order the AWS program tries them: a role, then SSO, then keys, then a program of the user's own.
+  for (const [name, flags] of seen) profiles[name]!.auth = flags.role ? 'role' : flags.sso ? 'sso' : flags.keys ? 'keys' : flags.process ? 'process' : 'none';
   return profiles;
 };
 

@@ -6,6 +6,8 @@ import { HELM_RELEASES } from '../shared/helm.ts';
 import { CLUSTER_OVERVIEW, DEFAULT_KIND, WORKLOADS_OVERVIEW } from '../shared/kinds.ts';
 import type { Obj, ScopeResult } from '../shared/types.ts';
 import { ActivityView } from './ActivityView.tsx';
+import { Discover } from './Discover.tsx';
+import { setPlans } from './signin.ts';
 import { Dock, type DockTab } from './dock/Dock.tsx';
 import { ErrorState, type ErrorInfo } from './errors.tsx';
 import { ForwardsSection } from './ForwardsSection.tsx';
@@ -81,6 +83,7 @@ export const App = () => {
   const [dockActive, setDockActive] = useState<string | null>(FORWARDS_TAB.id);
   const [unlockFor, setUnlockFor] = useState<string | null>(null);
   const [activity, setActivity] = useState(false);
+  const [discover, setDiscover] = useState(false);
   const layout: 'page' | 'rail' = ctx?.surface === 'page' && width >= PAGE_MIN_WIDTH ? 'page' : 'rail';
 
   const load = async (showSpinner: boolean, project: string | null): Promise<void> => {
@@ -92,6 +95,7 @@ export const App = () => {
     }
     const scope = (reply.scope ?? null) as ScopeResult | null;
     const current = (reply.current ?? null) as string | null;
+    setPlans(reply.contexts as ContextRow[], project);
     setBoot({ phase: 'ready', contexts: reply.contexts as ContextRow[], current, scope });
     setSel((prev) => (prev.touched ? prev : initialSelection(scope, current)));
   };
@@ -206,7 +210,15 @@ export const App = () => {
 
   let main;
   if (contexts.length === 0) {
-    main = <div class="k8s-pad"><Empty title="No clusters found" body="Add a cluster to your kubeconfig (usually ~/.kube/config), then open this panel again." /></div>;
+    main = (
+      <div class="k8s-pad">
+        <Empty
+          title="No clusters found"
+          body="Add a cluster to your kubeconfig (usually ~/.kube/config), or find the EKS clusters your AWS profiles can see."
+          action={{ label: 'Discover EKS clusters', onClick: () => setDiscover(true) }}
+        />
+      </div>
+    );
   } else if (!sel.context) {
     const candidates = scope?.candidates ?? [];
     main = (
@@ -268,6 +280,7 @@ export const App = () => {
         onUnlock={(name) => setUnlockFor(name)}
         onLockNow={(name) => void lockNow(name)}
         onActivity={() => setActivity(true)}
+        onDiscover={() => setDiscover(true)}
       />
       {currentRow?.protected && !currentRow.locked && currentRow.unlockedUntil && currentRow.unlockedUntil > Date.now() ? (
         <LockBanner
@@ -296,6 +309,17 @@ export const App = () => {
         >
           <div class="k8s-wrap">{`${unlockFor} is a production cluster. Unlocking allows writes from this panel and from the agent for 30 minutes, then it locks again. Lock it yourself with Lock now when you are done.`}</div>
         </Modal>
+      ) : null}
+      {discover ? (
+        <Discover
+          dir={dir}
+          onClose={() => setDiscover(false)}
+          onAdded={() => void load(false, dir)}
+          onUse={(name) => {
+            setDiscover(false);
+            pickContext(name);
+          }}
+        />
       ) : null}
       {activity && sel.context ? <ActivityView context={sel.context} dir={dir} onClose={() => setActivity(false)} /> : null}
     </div>

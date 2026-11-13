@@ -13,6 +13,8 @@ export interface ContextInfo {
   region: string | null;
   auth: 'aws' | 'oidc' | 'other' | 'none';
   awsProfile: string | null;
+  /** Contexts that share an OIDC login (same issuer and client) share this key. A short hash, never the values. */
+  oidcKey: string | null;
 }
 
 export interface ScopeResult {

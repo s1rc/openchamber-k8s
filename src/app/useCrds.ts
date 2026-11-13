@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { CrdEntry } from '../shared/crds.ts';
 import { call } from './host.ts';
+import { useRetryOnSignIn } from './signin.ts';
 
 export interface CrdsView {
   /** Null until the first answer. An empty list when the cluster has no custom resources, or the read failed. */
@@ -16,11 +17,11 @@ export interface CrdsView {
  * opened and on `reload` (when Definitions opens); nothing here polls.
  */
 export const useCrds = (context: string | null, dir: string | null): CrdsView => {
-  const [state, setState] = useState<{ crds: CrdEntry[] | null; failed: boolean }>({ crds: null, failed: false });
+  const [state, setState] = useState<{ crds: CrdEntry[] | null; failed: boolean; auth: boolean }>({ crds: null, failed: false, auth: false });
   const readRef = useRef<(refresh: boolean) => void>(() => undefined);
 
   useEffect(() => {
-    setState({ crds: null, failed: false });
+    setState({ crds: null, failed: false, auth: false });
     if (!context) {
       readRef.current = () => undefined;
       return;
@@ -31,8 +32,8 @@ export const useCrds = (context: string | null, dir: string | null): CrdsView =>
       const mine = ++latest;
       void call('GET', '/crds', { context, dir, refresh: refresh ? '1' : undefined }).then((reply) => {
         if (cancelled || mine !== latest) return;
-        if (reply.ok) setState({ crds: (reply.crds ?? []) as CrdEntry[], failed: false });
-        else setState((prev) => ({ crds: prev.crds ?? [], failed: true }));
+        if (reply.ok) setState({ crds: (reply.crds ?? []) as CrdEntry[], failed: false, auth: false });
+        else setState((prev) => ({ crds: prev.crds ?? [], failed: true, auth: reply.code === 'AUTH_EXPIRED' }));
       });
     };
     readRef.current = read;
@@ -42,5 +43,7 @@ export const useCrds = (context: string | null, dir: string | null): CrdsView =>
     };
   }, [context, dir]);
 
-  return { ...state, reload: () => readRef.current(true) };
+  // The navigation has no banner to carry the sign-in, so the list is read again when one finishes.
+  useRetryOnSignIn(context, state.auth, () => readRef.current(false));
+  return { crds: state.crds, failed: state.failed, reload: () => readRef.current(true) };
 };
